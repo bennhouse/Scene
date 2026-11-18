@@ -45,6 +45,11 @@ final class Restorer: ObservableObject {
             AX.requestTrust()
             return
         }
+        guard CGS.supported else {
+            status = "Scene can't read desktops on this version of macOS, so it can't restore scenes."
+            note("Restore cancelled: private APIs unavailable (\(CGS.missing.joined(separator: ", ")))")
+            return
+        }
         isRunning = true
         used = []
         abortRequested = false; skipWaiting = false

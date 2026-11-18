@@ -30,13 +30,13 @@ A scene saved with an external monitor can be restored on the Mac alone, and the
 
 ## Requirements
 
-- macOS 15 Sequoia or later, Apple Silicon or Intel
+- macOS 15 Sequoia or later, Apple Silicon or Intel. It opens on macOS 26 and later but has only been tested on Sequoia.
 - "Displays have separate Spaces" turned on (the default)
 - The Mission Control shortcuts "Move left a space" and "Move right a space" turned on in System Settings › Keyboard › Keyboard Shortcuts. Scene reads them from there.
 
 ## Install
 
-1. Download `Scene-1.0.dmg` from [Releases](../../releases) and drag Scene to Applications.
+1. Download `Scene-1.0.1.dmg` from [Releases](../../releases) and drag Scene to Applications.
 2. Scene is not notarized, so macOS blocks it the first time. Open System Settings › Privacy & Security, scroll down and click **Open Anyway**. You can also clear the quarantine flag from Terminal:
    ```
    xattr -dr com.apple.quarantine /Applications/Scene.app
@@ -49,12 +49,12 @@ You need the Xcode Command Line Tools (Swift 6).
 
 ```
 ./build.sh         # build/Scene.app for this Mac
-./make_dmg.sh      # universal build/Scene-1.0.dmg
+./make_dmg.sh      # universal build/Scene-<version>.dmg
 ```
 
 ## Things to know
 
-- Scene uses private macOS APIs, read-only: `CGSGetActiveSpace`, `CGSCopyManagedDisplaySpaces` and `CGSCopySpacesForWindows` to read desktops, plus `_AXUIElementGetWindow` and `_AXUIElementCreateWithRemoteToken` to reach windows on other desktops. SIP stays on. It is not an App Store app, and a macOS update could break it.
+- Scene uses private macOS APIs, read-only: `CGSGetActiveSpace`, `CGSCopyManagedDisplaySpaces` and `CGSCopySpacesForWindows` to read desktops, plus `_AXUIElementGetWindow` and `_AXUIElementCreateWithRemoteToken` to reach windows on other desktops. SIP stays on. It is not an App Store app, and a macOS update could break it. Scene looks these functions up when it starts: if a future macOS removes or changes them, Scene still opens, shows a notice and turns off saving and restoring, so it never acts without knowing which desktop a window is on. Your saved scenes are kept.
 - Scenes are stored in `~/Library/Application Support/Scene/scenes.json`. They include window titles, file paths and tab addresses. Nothing leaves your Mac.
 - The log is in `~/Library/Logs/Scene/Scene.log`. It is only readable by you and stays under 1 MB.
 - Scene has been tested on one Mac: Sequoia on Apple Silicon, with an external monitor that has two desktops. The Intel build has only been checked under Rosetta.

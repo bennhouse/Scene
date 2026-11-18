@@ -66,7 +66,10 @@ enum CLI {
             do { try store.exportData().write(to: URL(fileURLWithPath: path)); Log.write("EXPORT: \(store.scenes.count) scenes") }
             catch { Log.write("EXPORT failed: \(error)") }
         }
-        if let name = value("--save") {
+        if !CGS.supported {
+            Log.write("PRIVATE API unavailable: missing \(CGS.missing) · save and restore disabled")
+        }
+        if let name = value("--save"), CGS.supported {
             if let old = store.scene(named: name) { store.delete(old.id) }
             store.add(await Capture.full(name: name, restorer: restorer))
         }

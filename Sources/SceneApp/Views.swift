@@ -122,12 +122,12 @@ struct ContentView: View {
                     Label("New Scene", systemImage: "plus").toolbarIcon()
                 }
                 .keyboardShortcut("n")
-                .disabled(restorer.isRunning)
+                .disabled(restorer.isRunning || !CGS.supported)
                 .help("New scene from the open windows (⌘N)")
                 Button { confirmOverwrite = selected } label: {
                     Label("Update", systemImage: "arrow.clockwise").toolbarIcon()
                 }
-                .disabled(selected == nil || restorer.isRunning)
+                .disabled(selected == nil || restorer.isRunning || !CGS.supported)
                 .help("Update the selected scene with the open windows")
                 Menu {
                     Button("Export Selected Scene…") {
@@ -158,7 +158,10 @@ struct ContentView: View {
         .tone(.primary)
         .onChange(of: selection) { _, _ in editingTitle = false }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if !trusted { PermissionBanner() }
+            VStack(spacing: 0) {
+                if !trusted { PermissionBanner() }
+                if !CGS.supported { UnsupportedBanner() }
+            }
         }
         .sheet(item: $naming) { sheet in
             NamePrompt(title: sheet.renaming == nil ? "New Scene" : "Rename Scene",
@@ -395,7 +398,7 @@ struct SceneDetail: View {
                         .keyboardShortcut("r")
                         .help("Restore the scene (⌘R)")
                         .buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(restorer.isRunning)
+                        .disabled(restorer.isRunning || !CGS.supported)
                 }
                 ForEach(groups) { g in
                     VStack(alignment: .leading, spacing: 6) {
@@ -446,6 +449,22 @@ struct WindowRow: View {
             Text(verbatim: "\(Int(window.frame.width))×\(Int(window.frame.height))")
                 .font(.caption.monospacedDigit()).tone(.tertiary)
         }
+    }
+}
+
+/// macOS ha cambiato le funzioni private con cui Scene legge i desktop.
+struct UnsupportedBanner: View {
+    var body: some View {
+        HStack {
+            Image(systemName: "exclamationmark.triangle.fill").tone(.yellow)
+            Text("Scene can't read desktops on this version of macOS. Saving and restoring are turned off. Your saved scenes are kept.")
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .font(.callout)
+        .padding(10)
+        .background(Color.yellow.opacity(0.15))
+        .onAppear { Log.write("PRIVATE API unavailable: missing \(CGS.missing)") }
     }
 }
 

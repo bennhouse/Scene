@@ -55,6 +55,7 @@ enum AX {
     /// Trova solo finestre che qualche client AX ha già interrogato almeno una volta:
     /// chi la usa deve confrontare il risultato con CGWindowList.
     static func remoteWindows(pid: pid_t) -> [AXUIElement] {
+        guard remoteWindowsAvailable else { return [] }
         var token = Data(count: 20)
         token.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid) { Data($0) })
         token.replaceSubrange(8..<12, with: withUnsafeBytes(of: Int32(0x636f636f)) { Data($0) })
