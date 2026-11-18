@@ -1,0 +1,170 @@
+import Cocoa
+
+/// Legge lo stato attuale: app, finestre, monitor, desktop, contenuti.
+enum Capture {
+    /// Cattura completa. Le finestre sugli altri desktop si leggono tramite AX remoto, senza
+    /// cambiare desktop. Solo se qualcuna resta irraggiungibile (AX non l'ha mai vista) Scene
+    /// passa brevemente da quel desktop per leggerne titolo e documento, poi torna indietro.
+    @MainActor
+    static func full(name: String, restorer: Restorer) async -> SavedScene {
+        restorer.status = "Reading windows…"
+        defer { restorer.status = "" }
+        if AX.isTrusted && !AX.waitResponsive() {
+            Log.write("Capture: Accessibility not responding, titles and documents not read")
+        }
+        var wids: [UUID: CGWindowID] = [:]
+        var scene = current(name: name, windowIDs: &wids)
+        guard AX.isTrusted, !restorer.isRunning else { return scene }
+        let start = Dictionary(uniqueKeysWithValues: scene.displays.map { ($0.uuid, $0.currentOrdinal) })
+        let pending = scene.windows.filter { $0.desktopOrdinal != start[$0.displayUUID] && $0.title == nil }
+        guard !pending.isEmpty else { return scene }
+
+        restorer.isRunning = true
+        InputBlocker.shared.begin(maxSeconds: InputBlocker.cap)
+        defer { InputBlocker.shared.end(); restorer.isRunning = false }
+        let pointer = CGEvent(source: nil)?.location ?? .zero
+        let stops = Set(pending.map { "\($0.displayUUID)|\($0.desktopOrdinal)" }).sorted()
+        for stop in stops {
+            let parts = stop.split(separator: "|")
+            let uuid = String(parts[0]), ord = Int(parts[1]) ?? 1
+            guard await restorer.switchDesktop(uuid, to: ord) else { continue }
+            for (i, w) in scene.windows.enumerated()
+            where w.displayUUID == uuid && w.desktopOrdinal == ord && w.title == nil {
+                guard let wid = wids[w.id],
+                      let el = NSRunningApplication.runningApplications(withBundleIdentifier: w.bundleID)
+                        .flatMap({ AX.windows(pid: $0.processIdentifier) }).first(where: { AX.windowID($0) == wid })
+                else { continue }
+                let t = AX.title(el)
+                scene.windows[i].title = t
+                if scene.windows[i].content.documentPath == nil {
+                    if let d = AX.documentPath(el) {
+                        scene.windows[i].content.documentPath = d
+                    } else if let t,
+                              let d = DocResolver.resolve(title: t, appName: w.appName, appURL: URL(fileURLWithPath: w.appPath)) {
+                        scene.windows[i].content.documentPath = d
+                        scene.windows[i].content.documentFromTitle = true
+                    }
+                }
+            }
+        }
+        for (uuid, o) in start where Topology.display(uuid: uuid)?.currentOrdinal != o {
+            _ = await restorer.switchDesktop(uuid, to: o)
+        }
+        restorer.warp(to: pointer)
+        Log.write("Capture «\(name)»: \(pending.count) windows read by visiting their desktop")
+        return scene
+    }
+
+    static func current(name: String) -> SavedScene {
+        var ignored: [UUID: CGWindowID] = [:]
+        return current(name: name, windowIDs: &ignored)
+    }
+
+    static func current(name: String, windowIDs: inout [UUID: CGWindowID]) -> SavedScene {
+        let displays = Topology.displays()
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let info = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+                    as? [[String: Any]]) ?? []
+
+        // Arricchimento AX (solo finestre sui desktop visibili): titolo e documento.
+        var axByWID: [CGWindowID: (title: String?, doc: String?)] = [:]
+        var axFramesByPID: [pid_t: [(CGRect, String?, String?)]] = [:]
+        if AX.isTrusted {
+            for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != ownPID {
+                for w in AX.windows(pid: app.processIdentifier) {
+                    let t = AX.title(w), d = AX.documentPath(w)
+                    if let wid = AX.windowID(w) { axByWID[wid] = (t, d) }
+                    if let f = AX.frame(w) { axFramesByPID[app.processIdentifier, default: []].append((f, t, d)) }
+                }
+            }
+        }
+
+        // Contenuti via AppleScript (anche per finestre su altri desktop).
+        let scripted: [String: [Scripting.ScriptWindow]] = [
+            Scripting.finder: Scripting.finderWindows(),
+            Scripting.safari: Scripting.safariWindows(),
+            Scripting.chrome: Scripting.chromeWindows(),
+        ]
+
+        var windows: [SavedWindow] = []
+        var remoteDone = Set<pid_t>()
+        var z = 0
+        for w in info {
+            guard (w[kCGWindowLayer as String] as? Int) == 0,
+                  let wid = (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, pid != ownPID,
+                  let bDict = w[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: bDict),
+                  bounds.width >= 60, bounds.height >= 60,
+                  ((w[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+                  let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular,
+                  let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier,
+                  let appURL = app.bundleURL
+            else { continue }
+
+            // Space di appartenenza → monitor + desktop (solo desktop utente, non schermo intero).
+            guard let space = CGS.spaces(forWindow: wid).first,
+                  let (disp, ordinal) = Topology.locate(space: space, in: displays) else { continue }
+
+            var content = WindowContent()
+            var title: String?
+            if axByWID[wid] == nil, AX.isTrusted, !remoteDone.contains(pid) {
+                remoteDone.insert(pid)
+                for el in AX.remoteWindows(pid: pid) {
+                    if let id = AX.windowID(el), axByWID[id] == nil { axByWID[id] = (AX.title(el), AX.documentPath(el)) }
+                }
+            }
+            if let ax = axByWID[wid] {
+                title = ax.title; content.documentPath = ax.doc
+            } else if let m = axFramesByPID[pid]?.first(where: { near($0.0, bounds) }) {
+                title = m.1; content.documentPath = m.2
+            }
+            if let sw = scripted[bundleID]?.first(where: { near($0.bounds, bounds) }) {
+                title = title ?? sw.title
+                content.folderPath = sw.folderPath
+                if !sw.urls.isEmpty { content.urls = sw.urls; content.activeTab = sw.activeTab }
+                if sw.incognito { content.privateWindow = true }
+            }
+            // Firefox: schede lette via Accessibilità (anche su altri desktop, se raggiungibili).
+            if bundleID == BrowserAX.firefox, AX.isTrusted,
+               let el = (AX.windows(pid: pid) + AX.remoteWindows(pid: pid)).first(where: { AX.windowID($0) == wid }),
+               let tabs = BrowserAX.readTabs(el) {
+                content.urls = tabs.urls
+                content.activeTab = tabs.active
+            }
+
+            // App che non espongono AXDocument: il file si ricava dal titolo (Spotlight).
+            if content.documentPath == nil, content.folderPath == nil, (content.urls ?? []).isEmpty,
+               let t = title, let path = DocResolver.resolve(title: t, appName: app.localizedName ?? "", appURL: appURL) {
+                content.documentPath = path
+                content.documentFromTitle = true
+            }
+
+            let vf = disp.visibleFrame
+            let rel = CGRect(x: (bounds.minX - vf.minX) / vf.width, y: (bounds.minY - vf.minY) / vf.height,
+                             width: bounds.width / vf.width, height: bounds.height / vf.height)
+            let saved = SavedWindow(bundleID: bundleID, appName: app.localizedName ?? bundleID,
+                                       appPath: appURL.path, title: title,
+                                       displayUUID: disp.uuid, displayIsBuiltin: disp.isBuiltin,
+                                       desktopOrdinal: ordinal, frame: bounds, relFrame: rel,
+                                       content: content, zIndex: z)
+            windows.append(saved)
+            windowIDs[saved.id] = wid
+            z += 1
+        }
+
+        let saved = displays.map {
+            SavedDisplay(uuid: $0.uuid, isBuiltin: $0.isBuiltin, name: $0.name, frame: $0.frame,
+                         visibleFrame: $0.visibleFrame, desktopCount: $0.desktopCount,
+                         currentOrdinal: $0.currentOrdinal ?? 1)
+        }
+        Log.write("Capture «\(name)»: \(windows.count) windows, setup \(Topology.config(of: displays).label)")
+        return SavedScene(name: name, created: Date(), config: Topology.config(of: displays),
+                          displays: saved, windows: windows)
+    }
+
+    static func near(_ a: CGRect, _ b: CGRect, tol: CGFloat = 6) -> Bool {
+        abs(a.minX - b.minX) <= tol && abs(a.minY - b.minY) <= tol &&
+        abs(a.width - b.width) <= tol && abs(a.height - b.height) <= tol
+    }
+}
