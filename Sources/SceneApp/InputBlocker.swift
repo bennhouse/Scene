@@ -10,6 +10,8 @@ final class InputBlocker {
     static let marker: Int64 = 0x5CE1E
     /// Tetto del blocco per ogni ripristino, in secondi.
     static var cap: TimeInterval = 25
+    /// Chiamata (sul thread principale) a ogni pressione di Esc bloccata.
+    var onEscape: (() -> Void)?
 
     /// Tastiera + gesti (29 = gesture, 30 = dock swipe: i cambi desktop col trackpad).
     private static let mask: CGEventMask =
@@ -79,6 +81,12 @@ final class InputBlocker {
                 }
                 if event.getIntegerValueField(.eventSourceUserData) == InputBlocker.marker {
                     return Unmanaged.passUnretained(event)
+                }
+                // Esc resta bloccato come gli altri tasti, ma Scene lo conta: tre volte di fila
+                // interrompono il ripristino.
+                if type == .keyDown, event.getIntegerValueField(.keyboardEventKeycode) == 53,
+                   event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                    DispatchQueue.main.async { InputBlocker.shared.onEscape?() }
                 }
                 return nil
             }, userInfo: nil)

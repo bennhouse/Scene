@@ -13,16 +13,26 @@ final class ProgressOverlay {
     private var hud: NSPanel?
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    private let hintLabel = NSTextField(labelWithString: "")
     private var statusSink: AnyCancellable?
+    private var lastStatus = ""
+    /// Fino a quando il pannello mostra il contatore di Esc invece dello stato.
+    private var escapeUntil = Date.distantPast
+    private var escapeStopping = false
 
-    func show(title: String, status: Published<String>.Publisher, appPaths: [String]) {
+    func show(title: String, status: Published<String>.Publisher, appPaths: [String], stopHint: Bool = false) {
         hide(animated: false)
+        escapeUntil = .distantPast
+        escapeStopping = false
+        hintLabel.stringValue = stopHint ? "esc ×3 to stop" : ""
         let colors = AppColors.average(appPaths)
         for screen in NSScreen.screens { borders.append(makeBorder(on: screen, colors: colors)) }
         let main = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hud = makeHUD(on: main, title: title)
         statusSink = status.receive(on: RunLoop.main).sink { [weak self] s in
-            self?.detailLabel.stringValue = s.isEmpty ? "Please wait…" : s
+            guard let self else { return }
+            self.lastStatus = s
+            if Date() >= self.escapeUntil && !self.escapeStopping { self.showStatus() }
         }
         for w in borders + [hud].compactMap({ $0 }) {
             w.alphaValue = 0
@@ -37,6 +47,33 @@ final class ProgressOverlay {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.25
             hud?.animator().alphaValue = 1
+        }
+    }
+
+    private func showStatus() {
+        detailLabel.stringValue = lastStatus.isEmpty ? "Please wait…" : lastStatus
+        detailLabel.textColor = .secondaryLabelColor
+    }
+
+    /// Contatore delle pressioni di Esc (1, 2 o 3) al posto dello stato: avvisa che altre
+    /// pressioni fermano il ripristino. Sparisce dopo due secondi senza altre pressioni.
+    func showEscape(count: Int) {
+        guard hud != nil else { return }
+        let dots = String(repeating: "●", count: count) + String(repeating: "○", count: 3 - count)
+        if count >= 3 {
+            escapeStopping = true
+            detailLabel.stringValue = "\(dots)  Stopping the restore…"
+        } else {
+            let left = 3 - count
+            detailLabel.stringValue = "\(dots)  Press Esc \(left) more time\(left == 1 ? "" : "s") to stop"
+        }
+        detailLabel.textColor = .systemOrange
+        let until = Date().addingTimeInterval(2)
+        escapeUntil = until
+        guard count < 3 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.05) { [weak self] in
+            guard let self, self.escapeUntil == until, !self.escapeStopping else { return }
+            self.showStatus()
         }
     }
 
@@ -169,7 +206,16 @@ final class ProgressOverlay {
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingTail
 
-        let texts = NSStackView(views: [titleLabel, detailLabel])
+        hintLabel.font = .systemFont(ofSize: 10)
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let titleRow = NSStackView(views: [titleLabel, hintLabel])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .firstBaseline
+        titleRow.spacing = 8
+        let texts = NSStackView(views: [titleRow, detailLabel])
         texts.orientation = .vertical
         texts.alignment = .leading
         texts.spacing = 2

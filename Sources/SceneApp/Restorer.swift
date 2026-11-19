@@ -29,12 +29,28 @@ final class Restorer: ObservableObject {
     private var triedNewInstance = false
     private var skipWaiting = false
     private var abortRequested = false
+    /// Pressioni recenti di Esc: tre in due secondi interrompono il ripristino.
+    private var escapePresses: [Date] = []
     private let blocker = InputBlocker.shared
 
     init() {
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.spaceChanges += 1 }
+        }
+    }
+
+    /// Una pressione di Esc durante il ripristino. Non conta mentre un'app chiede qualcosa
+    /// (lì Esc serve a rispondere alla richiesta).
+    private func escapePressed() {
+        guard isRunning, !abortRequested, waitingApps.isEmpty else { return }
+        let now = Date()
+        escapePresses = escapePresses.filter { now.timeIntervalSince($0) < 2 } + [now]
+        let n = escapePresses.count
+        ProgressOverlay.shared.showEscape(count: min(n, 3))
+        if n >= 3 {
+            note("Stopped with Esc")
+            abort()
         }
     }
 
@@ -73,8 +89,24 @@ final class Restorer: ObservableObject {
         let t0 = Date()
         blocker.begin(maxSeconds: InputBlocker.cap)
         ProgressOverlay.shared.show(title: "Restoring «\(scene.name)»", status: $status,
-                                   appPaths: scene.windows.map(\.appPath))
-        defer { blocker.end(); isRunning = false; ProgressOverlay.shared.hide() }
+                                   appPaths: scene.windows.map(\.appPath), stopHint: true)
+        // Esc tre volte per fermarsi. Mentre la tastiera è bloccata lo vede il blocco; quando è
+        // libera (il blocco dura al massimo 25 s, o è in pausa) lo vedono questi monitor.
+        escapePresses = []
+        blocker.onEscape = { [weak self] in MainActor.assumeIsolated { self?.escapePressed() } }
+        let escape: (NSEvent) -> Void = { [weak self] e in
+            guard e.keyCode == 53, !e.isARepeat else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.escapePressed() } }
+        }
+        let monitors: [Any?] = [
+            NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: escape),
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { escape($0); return $0 },
+        ]
+        defer {
+            blocker.onEscape = nil
+            monitors.compactMap { $0 }.forEach(NSEvent.removeMonitor)
+            blocker.end(); isRunning = false; ProgressOverlay.shared.hide()
+        }
 
         let displays = Topology.displays()
         let start = Dictionary(uniqueKeysWithValues: displays.map { ($0.uuid, $0.currentOrdinal ?? 1) })
@@ -849,6 +881,7 @@ final class Restorer: ObservableObject {
         let previous = status
         defer { status = previous }
         while Date() < (anyLoading ? loadingDeadline : deadline) {
+            if abortRequested { return }
             var done = true
             var loading: [String] = []
             for b in bundleIDs {
@@ -1280,6 +1313,7 @@ final class Restorer: ObservableObject {
         let watcher = AXWatcher()
         defer { watcher.stop() }
         while Date() < deadline {
+            if abortRequested { return nil }
             watcher.watch(pids(bundleID))
             await watcher.wait(upTo: 0.2)
             ours.formUnion(windowIDs(bundleID).subtracting(before))
