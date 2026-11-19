@@ -213,10 +213,12 @@ final class Restorer: ObservableObject {
             if sceneApps.contains(b) { return "KEEP \(name) (in the scene)" }
             if b == Scripting.finder { return "KEEP \(name) (Finder: only its windows are closed)" }
             let els = AX.allWindows(pid: app.processIdentifier)
-            let edited = els.filter(AX.isEdited).map { AX.title($0) ?? "?" }
+            let edited = els.filter { AX.isEdited($0) == true }.map { AX.title($0) ?? "?" }
+            let unknown = els.filter { AX.isEdited($0) == nil }.count
             let unread = cgWindows(pid: app.processIdentifier).count - els.count
             return "QUIT \(name)" + (edited.isEmpty ? "" : " unsaved: \(edited.joined(separator: ", "))")
                 + (unread > 0 ? " (\(unread) windows not readable from here)" : "")
+                + (unknown > 0 ? " (\(unknown) windows without an edited flag)" : "")
         }.sorted()
     }
 
@@ -240,13 +242,8 @@ final class Restorer: ObservableObject {
             // Il puntatore sul monitor giusto: le scorciatoie agiscono sul monitor attivo. Se è già
             // lì resta dov'è (niente salti del puntatore a ogni desktop): basta il movimento sul posto.
             let here = CGEvent(source: nil)?.location ?? .zero
-            if disp.frame.contains(here) {
-                warp(to: here)
-                await sleep(0.03)
-            } else {
-                warp(to: CGPoint(x: disp.frame.midX, y: disp.frame.midY))
-                await sleep(0.12)
-            }
+            warp(to: disp.frame.contains(here) ? here : CGPoint(x: disp.frame.midX, y: disp.frame.midY))
+            await sleep(0.12)
             let before = disp.currentSpace
             let n0 = spaceChanges
             (target > cur ? Prefs.shared.right : Prefs.shared.left).post()
@@ -572,6 +569,7 @@ final class Restorer: ObservableObject {
         // qui si leggono passando dal loro desktop; se non si leggono neanche lì, l'app non si
         // può controllare e lo si dice.
         var edited: [Closing] = []
+        var unchecked = Set<pid_t>()
         var unreachable: [CGSSpaceID: Set<pid_t>] = [:]
         func name(_ pid: pid_t) -> String {
             apps.first { $0.processIdentifier == pid }?.localizedName ?? "App"
@@ -581,12 +579,15 @@ final class Restorer: ObservableObject {
             let cg = cgWindows(pid: pid)
             let els = await offMain { AX.allWindows(pid: pid) }
             let seen = Set(els.compactMap(AX.windowID))
-            for el in els where AX.isEdited(el) {
-                if let id = AX.windowID(el) { edited.append(Closing(el: el, pid: pid, wid: id, app: name(pid))) }
+            for el in els {
+                switch AX.isEdited(el) {
+                case true?: if let id = AX.windowID(el) { edited.append(Closing(el: el, pid: pid, wid: id, app: name(pid))) }
+                case nil: unchecked.insert(pid)   // finestra senza l'informazione: non si sa
+                default: break
+                }
             }
             for (wid, sp) in cg where !seen.contains(wid) { unreachable[sp, default: []].insert(pid) }
         }
-        var unchecked = Set<pid_t>()
         for (space, pidsThere) in unreachable.sorted(by: { $0.key < $1.key }) {
             if abortRequested { return nil }
             guard let (d, o) = Topology.locate(space: space, in: Topology.displays()),
@@ -596,8 +597,9 @@ final class Restorer: ObservableObject {
                     AX.windowID(el).map { CGS.spaces(forWindow: $0).first == space } ?? false
                 }
                 if here.isEmpty { unchecked.insert(pid); continue }
-                for el in here where AX.isEdited(el) {
-                    if let id = AX.windowID(el), !edited.contains(where: { $0.wid == id }) {
+                for el in here {
+                    guard let state = AX.isEdited(el) else { unchecked.insert(pid); continue }
+                    if state, let id = AX.windowID(el), !edited.contains(where: { $0.wid == id }) {
                         edited.append(Closing(el: el, pid: pid, wid: id, app: name(pid)))
                     }
                 }
@@ -656,12 +658,16 @@ final class Restorer: ObservableObject {
                     note("Waiting for: \(who.joined(separator: ", "))")
                 }
             } else if Date().timeIntervalSince(lastPrompt) > 6 {
+                // Restano aperte: non si chiudono neanche le loro finestre (sarebbe chiedere due volte).
                 note("Did not quit: \(running.map { $0.localizedName ?? "App" }.joined(separator: ", "))")
+                leftOpen.formUnion(running.compactMap(\.bundleIdentifier))
                 break
             }
             await sleep(0.2)
         }
         if paused { blocker.resume() }
+        // Saltata l'attesa: le app ancora aperte restano aperte, finestre comprese.
+        leftOpen.formUnion(toQuit.filter { !$0.isTerminated }.compactMap(\.bundleIdentifier))
         waitingApps = []
         if !abortRequested { skipWaiting = false }
         return leftOpen

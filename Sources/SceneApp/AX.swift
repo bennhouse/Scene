@@ -152,9 +152,10 @@ enum AX {
 
     /// La finestra ha modifiche non salvate? È il pallino nel pulsante rosso (AXEdited).
     /// Le app che salvano da sole (Pagine, TextEdit…) non lo mostrano: chiuderle non perde nulla.
-    static func isEdited(_ el: AXUIElement) -> Bool {
-        guard let b = attr(el, kAXCloseButtonAttribute) else { return false }
-        return bool(b as! AXUIElement, "AXEdited")
+    /// nil quando non si può sapere (nessun pulsante rosso o nessuna informazione).
+    static func isEdited(_ el: AXUIElement) -> Bool? {
+        guard let b = attr(el, kAXCloseButtonAttribute) else { return nil }
+        return (attr(b as! AXUIElement, "AXEdited") as? NSNumber)?.boolValue
     }
 
     /// L'app sta mostrando una richiesta (per esempio «Vuoi salvare?») in una delle sue finestre?

@@ -31,7 +31,7 @@ Before restoring, Scene can close windows on every desktop. You can choose which
 - **the scene's windows**: windows of the apps in the scene
 - **all windows**
 
-Windows are closed with their close button, so apps can still ask you to save. If one does, Scene pauses until you answer. Apps that only hide their window when you close it (Claude, Music) count as closed, and get their window back when a scene needs it.
+Windows are closed with their close button, so apps can still ask you to save. If one does, Scene pauses until you answer. Apps that only hide their window when you close it (Claude, Music) count as closed. When a scene needs one of their windows, Scene asks the app to show it again, as a click in the Dock would.
 
 If a slow app opens a document of the scene twice (for example because Scene tried again with a second instance), the late copy is closed at the end.
 
