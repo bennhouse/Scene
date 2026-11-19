@@ -66,7 +66,7 @@ enum Capture {
                 if scene.windows[i].content.documentPath == nil {
                     if let d = AX.documentPath(el) {
                         scene.windows[i].content.documentPath = d
-                    } else if let t,
+                    } else if let t, !AX.isUnsavedDocument(el),
                               let d = DocResolver.resolve(title: t, appName: w.appName, appURL: URL(fileURLWithPath: w.appPath)) {
                         scene.windows[i].content.documentPath = d
                         scene.windows[i].content.documentFromTitle = true
@@ -95,12 +95,17 @@ enum Capture {
 
         // Arricchimento AX (solo finestre sui desktop visibili): titolo e documento.
         var axByWID: [CGWindowID: (title: String?, doc: String?)] = [:]
+        // Finestre di documenti mai salvati: non si cerca un file dal loro titolo.
+        var unsaved = Set<CGWindowID>()
         var axFramesByPID: [pid_t: [(CGRect, String?, String?)]] = [:]
         if AX.isTrusted {
             for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != ownPID {
                 for w in AX.windows(pid: app.processIdentifier) {
                     let t = AX.title(w), d = AX.documentPath(w)
-                    if let wid = AX.windowID(w) { axByWID[wid] = (t, d) }
+                    if let wid = AX.windowID(w) {
+                        axByWID[wid] = (t, d)
+                        if AX.isUnsavedDocument(w) { unsaved.insert(wid) }
+                    }
                     if let f = AX.frame(w) { axFramesByPID[app.processIdentifier, default: []].append((f, t, d)) }
                 }
             }
@@ -139,7 +144,10 @@ enum Capture {
             if axByWID[wid] == nil, AX.isTrusted, !remoteDone.contains(pid) {
                 remoteDone.insert(pid)
                 for el in AX.remoteWindows(pid: pid) {
-                    if let id = AX.windowID(el), axByWID[id] == nil { axByWID[id] = (AX.title(el), AX.documentPath(el)) }
+                    if let id = AX.windowID(el), axByWID[id] == nil {
+                        axByWID[id] = (AX.title(el), AX.documentPath(el))
+                        if AX.isUnsavedDocument(el) { unsaved.insert(id) }
+                    }
                 }
             }
             if let ax = axByWID[wid] {
@@ -182,7 +190,7 @@ enum Capture {
 
             // App che non espongono AXDocument: il file si ricava dal titolo (Spotlight).
             if content.documentPath == nil, content.folderPath == nil, (content.urls ?? []).isEmpty,
-               let t = title, let path = DocResolver.resolve(title: t, appName: app.localizedName ?? "", appURL: appURL) {
+               !unsaved.contains(wid), let t = title, let path = DocResolver.resolve(title: t, appName: app.localizedName ?? "", appURL: appURL) {
                 content.documentPath = path
                 content.documentFromTitle = true
             }

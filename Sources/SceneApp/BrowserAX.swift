@@ -63,7 +63,8 @@ enum BrowserAX {
 
     /// Voce di menu dell'app con scorciatoia ⌘ + lettera (senza altri modificatori), cercata
     /// per scorciatoia e non per nome, così funziona in ogni lingua.
-    static func menuItem(pid: pid_t, cmdChar: String) -> AXUIElement? {
+    /// `modifiers`: modificatori oltre a ⌘ (1 = ⇧).
+    static func menuItem(pid: pid_t, cmdChar: String, modifiers: Int = 0) -> AXUIElement? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 1.0)
         guard let barRef = AX.attr(app, kAXMenuBarAttribute) else { return nil }
@@ -71,7 +72,7 @@ enum BrowserAX {
         func search(_ menu: AXUIElement) -> AXUIElement? {
             kids(menu).first { item in
                 (AX.attr(item, kAXMenuItemCmdCharAttribute) as? String)?.uppercased() == cmdChar.uppercased()
-                    && (AX.attr(item, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue == 0
+                    && (AX.attr(item, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue == modifiers
                     && AX.bool(item, kAXEnabledAttribute)
             }
         }

@@ -25,12 +25,17 @@ final class Restorer: ObservableObject {
     private var placedDocuments: [(bundleID: String, appName: String, path: String, id: CGWindowID)] = []
     /// Finestre della scena per cui Firefox è stato avviato direttamente con le loro schede.
     private var launchedWithTabs = Set<UUID>()
+    /// Safari qui non permette le finestre private (restrizioni di Tempo di utilizzo): non si
+    /// riprova finché Scene resta aperto.
+    private var safariPrivateBlocked = false
     /// In questo ripristino si è aperta una seconda istanza di un'app per un documento.
     private var triedNewInstance = false
     private var skipWaiting = false
     private var abortRequested = false
     /// Pressioni recenti di Esc: tre in due secondi interrompono il ripristino.
     private var escapePresses: [Date] = []
+    /// Cosa fare delle finestre con modifiche non salvate, chiesto una volta per ripristino.
+    private var unsavedWindowsChoice: UnsavedChoice?
     private let blocker = InputBlocker.shared
 
     init() {
@@ -82,6 +87,7 @@ final class Restorer: ObservableObject {
         ours = []
         placedDocuments = []
         triedNewInstance = false
+        unsavedWindowsChoice = nil
         launchedWithTabs = []
         preexisting = Set(((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]) ?? [])
             .compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
@@ -367,6 +373,7 @@ final class Restorer: ObservableObject {
             }
             for (wid, sp) in cg where !found.contains(wid) { missing[sp, default: 0] += 1 }
         }
+        guard let items = checkUnsaved(items) else { return }
         await closeAndWait(items)
 
         // Finestre non raggiungibili da remoto: si va sul loro desktop.
@@ -382,6 +389,7 @@ final class Restorer: ObservableObject {
                     more.append(Closing(el: w, pid: app.processIdentifier, wid: id, app: app.localizedName ?? "App"))
                 }
             }
+            guard let more = checkUnsaved(more) else { return }
             await closeAndWait(more)
         }
     }
@@ -397,14 +405,14 @@ final class Restorer: ObservableObject {
                 remaining.remove(id)
             }
         }
-        await closeAndWait(items)
+        await closeAndWait(keepEdited(items))
         for id in remaining {
             guard let sp = CGS.spaces(forWindow: id).first,
                   let (d, o) = Topology.locate(space: sp, in: Topology.displays()),
                   await switchDesktop(d.uuid, to: o) else { continue }
             for pid in pids(bundleID) {
                 if let el = AX.windows(pid: pid).first(where: { AX.windowID($0) == id }) {
-                    await closeAndWait([Closing(el: el, pid: pid, wid: id, app: appName)])
+                    await closeAndWait(keepEdited([Closing(el: el, pid: pid, wid: id, app: appName)]))
                 }
             }
         }
@@ -715,17 +723,56 @@ final class Restorer: ObservableObject {
 
     private enum UnsavedChoice { case keepOpen, quitAnyway, stop }
 
+    /// Prima di chiudere finestre: se qualcuna ha modifiche non salvate (il pallino nel pulsante
+    /// rosso), chiede se tenerle aperte o chiuderle comunque, una volta sola per ripristino.
+    /// Restituisce le finestre da chiudere, o nil se l'utente ferma il ripristino.
+    private func checkUnsaved(_ items: [Closing]) -> [Closing]? {
+        let edited = items.filter { AX.isEdited($0.el) == true }
+        guard !edited.isEmpty else { return items }
+        if unsavedWindowsChoice == nil {
+            var lines: [String] = []
+            for app in Set(edited.map(\.app)).sorted() {
+                let titles = edited.filter { $0.app == app }.map { AX.title($0.el).flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled" }
+                lines.append("\(app): \(titles.joined(separator: ", "))")
+            }
+            note("Unsaved changes before closing: \(lines.joined(separator: "; "))")
+            unsavedWindowsChoice = askAboutUnsaved(lines, quitting: false)
+        }
+        switch unsavedWindowsChoice! {
+        case .keepOpen:
+            note("Keeping \(edited.count) windows with unsaved changes open")
+            return items.filter { i in !edited.contains { $0.wid == i.wid } }
+        case .quitAnyway: return items
+        case .stop:
+            note("Restore stopped before closing windows")
+            abort()
+            return nil
+        }
+    }
+
+    /// Chiusure decise da Scene da sola (un documento aperto altrove, una copia arrivata in
+    /// ritardo): una finestra con modifiche non salvate non si chiude mai.
+    private func keepEdited(_ items: [Closing]) -> [Closing] {
+        items.filter { i in
+            guard AX.isEdited(i.el) == true else { return true }
+            note("\(i.app): «\(AX.title(i.el) ?? "")» has unsaved changes, leaving it open")
+            return false
+        }
+    }
+
     /// Chiede cosa fare delle app con modifiche non salvate. La tastiera torna libera mentre
     /// l'avviso è aperto.
-    private func askAboutUnsaved(_ lines: [String]) -> UnsavedChoice {
+    /// `quitting`: si stanno chiudendo app intere (altrimenti finestre).
+    private func askAboutUnsaved(_ lines: [String], quitting: Bool = true) -> UnsavedChoice {
         blocker.pause()
         defer { blocker.resume() }
         let alert = NSAlert()
-        alert.messageText = "Some apps have unsaved changes"
+        alert.messageText = quitting ? "Some apps have unsaved changes" : "Some windows have unsaved changes"
         alert.informativeText = lines.joined(separator: "\n")
-            + "\n\nKeep them open, or quit them anyway (each app asks whether to save)?"
+            + (quitting ? "\n\nKeep them open, or quit them anyway (each app asks whether to save)?"
+                        : "\n\nKeep them open, or close them anyway (each app asks whether to save)?")
         alert.addButton(withTitle: "Keep Them Open")
-        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: quitting ? "Quit Anyway" : "Close Anyway")
         alert.addButton(withTitle: "Stop Restoring")
         alert.layout()
         // Sul desktop attuale, davanti a tutto: attivare Scene non deve portare a un altro desktop.
@@ -1109,6 +1156,12 @@ final class Restorer: ObservableObject {
                 // Finestra nuova, poi si guarda cosa contiene (Chrome senza finestre può rimetterci
                 // da solo l'ultima finestra chiusa) e si fa solo quello che manca.
                 let wantsIncognito = bid == Scripting.chrome && c.privateWindow == true
+                if bid == Scripting.safari && c.privateWindow == true,
+                   let el = await safariPrivateWindow(allowed: allowed) {
+                    // AppleScript non vede le finestre private: le loro pagine non si possono riaprire.
+                    note("Safari: opened a private window (its pages can't be reopened automatically)")
+                    return el
+                }
                 // Se qui c'è già una finestra con solo schede vuote (quella che il browser apre
                 // all'avvio) si usa quella: niente seconda finestra.
                 let script = bid == Scripting.safari ? Scripting.safariWindows() : Scripting.chromeWindows()
@@ -1221,6 +1274,34 @@ final class Restorer: ObservableObject {
         }
         let spaces = pids(bid).flatMap { cgWindows(pid: $0) }.map { "\($0.0)@\($0.1)" }
         note("\(w.appName): no window after reopening it (windows: \(spaces.isEmpty ? "none" : spaces.joined(separator: ", ")); allowed: \(allowed.sorted()))")
+        return nil
+    }
+
+    /// Apre una finestra privata di Safari dal suo menu. Se Safari risponde con l'avviso
+    /// «Navigazione privata non disponibile» (restrizioni sui contenuti web di Tempo di utilizzo),
+    /// lo chiude con Annulla e restituisce nil: la finestra si riapre come finestra normale.
+    private func safariPrivateWindow(allowed: Set<CGSSpaceID>) async -> AXUIElement? {
+        guard !safariPrivateBlocked, let pid = pids(Scripting.safari).first,
+              let item = BrowserAX.menuItem(pid: pid, cmdChar: "N", modifiers: 1) else { return nil }
+        let before = windowIDs(Scripting.safari)
+        BrowserAX.press(item)
+        let deadline = Date().addingTimeInterval(4)
+        while Date() < deadline {
+            await sleep(0.2)
+            if let alert = AX.alert(pid: pid) {
+                AX.cancel(alert)
+                safariPrivateBlocked = true
+                note("Safari doesn't allow private windows on this Mac (Screen Time web content restrictions): opening a normal window instead")
+                status = "Safari: no private windows here"
+                await sleep(0.3)
+                return nil
+            }
+            ours.formUnion(windowIDs(Scripting.safari).subtracting(before))
+            if let n = candidates(Scripting.safari, allowed: allowed).first(where: { el in
+                AX.windowID(el).map { !before.contains($0) } == true
+                    && AX.string(el, kAXSubroleAttribute) == kAXStandardWindowSubrole
+            }) { return n }
+        }
         return nil
     }
 

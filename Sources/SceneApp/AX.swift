@@ -117,6 +117,16 @@ enum AX {
 
     static func title(_ el: AXUIElement) -> String? { string(el, kAXTitleAttribute) }
 
+    /// La finestra è di un'app a documenti (espone AXDocument) ma il suo documento non è mai
+    /// stato salvato: non c'è un file da cercare dal titolo («Senza nome» non è un file).
+    static func isUnsavedDocument(_ el: AXUIElement) -> Bool {
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(el, &names) == .success,
+              (names as? [String])?.contains(kAXDocumentAttribute) == true else { return false }
+        var v: CFTypeRef?
+        return AXUIElementCopyAttributeValue(el, kAXDocumentAttribute as CFString, &v) != .success || v == nil
+    }
+
     static func documentPath(_ el: AXUIElement) -> String? {
         guard let s = string(el, kAXDocumentAttribute), let u = URL(string: s), u.isFileURL else { return nil }
         return u.path
@@ -173,6 +183,24 @@ enum AX {
             if [kAXDialogSubrole, kAXSystemDialogSubrole].contains(string(w, kAXSubroleAttribute) ?? "") { return true }
             let kids = attr(w, kAXChildrenAttribute) as? [AXUIElement] ?? []
             return kids.contains { string($0, kAXRoleAttribute) == "AXSheet" }
+        }
+    }
+
+    /// Un avviso dell'app (finestra di dialogo senza pulsante rosso ma con un pulsante Annulla),
+    /// per esempio «Navigazione privata non disponibile» di Safari.
+    static func alert(pid: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 1.0)
+        return (attr(app, kAXWindowsAttribute) as? [AXUIElement] ?? []).first { w in
+            string(w, kAXSubroleAttribute) == kAXDialogSubrole && attr(w, kAXCloseButtonAttribute) == nil
+                && attr(w, kAXCancelButtonAttribute) != nil
+        }
+    }
+
+    /// Preme Annulla in un avviso.
+    static func cancel(_ alert: AXUIElement) {
+        if let b = attr(alert, kAXCancelButtonAttribute) {
+            AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString)
         }
     }
 

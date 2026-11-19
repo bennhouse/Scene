@@ -31,7 +31,10 @@ enum DocResolver {
     }
 
     /// Titoli di documenti mai salvati: non corrispondono a un file.
-    private static let placeholders = ["Untitled", "Senza titolo", "Sans titre", "Ohne Titel", "Sin título"]
+    /// (Per le app a documenti Scene lo sa già dall'Accessibilità; questi nomi servono per le altre.)
+    private static let placeholders = ["Untitled", "Senza titolo", "Senza nome", "Sans titre", "Ohne Titel", "Sin título",
+                                       "Sem título", "Naamloos", "Namnlös", "Bez názvu", "Bez tytułu", "Без названия",
+                                       "名称未設定", "未命名", "제목 없음"]
 
     /// Il titolo sembra il nome di un file (ha un'estensione, anche prima di « — App»)?
     static func looksLikeFile(_ title: String) -> Bool {
