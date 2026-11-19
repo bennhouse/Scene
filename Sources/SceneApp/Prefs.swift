@@ -86,6 +86,7 @@ struct Shortcut: Codable, Equatable {
 /// Cosa chiudere prima di ripristinare, su ogni desktop toccato dalla scena.
 enum CloseMode: String, CaseIterable, Identifiable {
     case notIncluded  // tutte le finestre tranne quelle della scena già aperte al loro posto
+    case appsNotIncluded // esce dalle app che non sono nella scena, poi come notIncluded
     case scene        // le finestre delle app che fanno parte della scena
     case all          // tutte le finestre di tutte le app
     var id: String { rawValue }
@@ -94,6 +95,7 @@ enum CloseMode: String, CaseIterable, Identifiable {
         case .scene: return "the scene's windows"
         case .all: return "all windows"
         case .notIncluded: return "windows not in the scene"
+        case .appsNotIncluded: return "apps not in the scene"
         }
     }
 }

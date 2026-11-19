@@ -6,9 +6,10 @@ import Cocoa
 ///   --import <file.json>      importa scene (file esportato, elenco o scena singola)
 ///   --export <file.json>      esporta tutte le scene
 ///   --save <nome>             salva la scena attuale con quel nome
-///   --restore <nome>          ripristina la scena (--close-first [--close-mode all|scene])
+///   --restore <nome>          ripristina la scena (--close-first [--close-mode all|scene|notIncluded|appsNotIncluded])
 ///   --switch <uuid> <n>       porta il monitor al desktop n e torna indietro
 ///   --dry-not-included <nome> elenca cosa terrebbe/chiuderebbe «le finestre non incluse»
+///   --dry-apps <nome>         elenca le app che «le app non incluse» chiuderebbe, con le modifiche non salvate
 ///   --block-cap <s>           tetto del blocco tastiera (default 25 s)
 ///   --setups                  scrive nel log la configurazione di monitor di ogni scena
 ///   --snapshot <cartella>     salva l'immagine della finestra attiva e non attiva (--dark: modalità scura)
@@ -82,6 +83,9 @@ enum CLI {
         }
         if let name = value("--dry-not-included"), let s = store.scene(named: name) {
             for line in restorer.describeNotIncluded(s) { Log.write("DRY " + line) }
+        }
+        if let name = value("--dry-apps"), let s = store.scene(named: name) {
+            for line in restorer.describeAppsNotIncluded(s) { Log.write("DRY " + line) }
         }
         if let name = value("--restore"), let s = store.scene(named: name) {
             await restorer.restore(s, closeFirst: args.contains("--close-first"),

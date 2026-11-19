@@ -262,6 +262,13 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .fixedSize()
+                .help("""
+                    Windows not in the scene: every window except the scene's own, already in place.
+                    Apps not in the scene: quits the apps the scene doesn't use, after checking for \
+                    unsaved changes, then closes the other windows not in the scene.
+                    The scene's windows: every window of the scene's apps.
+                    All windows: every window of every app.
+                    """)
                 Text("before restoring a scene")
                     .lineLimit(1)
                     .fixedSize()
@@ -801,9 +808,7 @@ final class WindowHelperView: NSView {
         for o in [observer, removal].compactMap({ $0 }) { NotificationCenter.default.removeObserver(o) }
         observer = nil; removal = nil
         guard let w = window else { return }
-        // «Sempre in primo piano» solo quando Scene non è l'app attiva. Quando è attiva la sua
-        // finestra è già davanti a tutto e resta normale: così si trascina tra i desktop come le
-        // altre (macOS decide come trattarla all'inizio del trascinamento, in base al livello).
+        // Sempre in primo piano (vedi WindowLevel).
         WindowLevel.attach(w)
         if Shared.firstLaunch {
             Shared.firstLaunch = false

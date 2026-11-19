@@ -73,15 +73,21 @@ enum Permissions {
     }
 }
 
-/// La finestra di Scene sta sempre in primo piano quando si usa un'altra app; mentre Scene è
-/// attiva è una finestra normale (davanti comunque, e trascinabile tra i desktop come le altre).
-/// Quando si manda l'utente nelle Impostazioni di Sistema il primo piano si sospende, altrimenti
-/// le coprirebbe, e riprende al ritorno in Scene.
+/// La finestra di Scene sta sempre in primo piano, anche mentre si usano le altre app: è già a
+/// quel livello prima del clic altrove, così non c'è il lampo di una finestra che le passa sopra
+/// e poi torna dietro. Torna una finestra normale solo quando serve:
+/// - mentre la si trascina per la barra del titolo (macOS la sposta tra i desktop solo se è
+///   normale, e lo decide all'inizio del trascinamento);
+/// - mentre è aperta un'altra finestra di Scene (Impostazioni, pannelli), che starebbe dietro;
+/// - durante un ripristino o una cattura, per non coprire le richieste delle app («Vuoi salvare?»);
+/// - quando si manda l'utente nelle Impostazioni di Sistema (fino al ritorno in Scene).
 @MainActor
 enum WindowLevel {
     private static weak var window: NSWindow?
     private static var observers: [NSObjectProtocol] = []
+    private static var monitor: Any?
     private static var suspended = false
+    private static var dragging = false
 
     static func attach(_ w: NSWindow) {
         window = w
@@ -91,15 +97,54 @@ enum WindowLevel {
             nc.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated { suspended = false; update() }
             },
-            nc.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
+            nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated { update() }
             },
+            nc.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { _ in
+                // La finestra che si chiude è ancora visibile: si guarda subito dopo.
+                DispatchQueue.main.async { MainActor.assumeIsolated { update() } }
+            },
         ]
+        if monitor == nil {
+            // Il monitor locale vede il clic prima della finestra: il livello cambia in tempo.
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { e in
+                MainActor.assumeIsolated {
+                    if let w = window, e.window === w, isTitleBar(e, in: w) { beginDrag() }
+                }
+                return e
+            }
+        }
         update()
     }
 
+    /// Il clic è nella barra del titolo e degli strumenti (sopra il contenuto)?
+    private static func isTitleBar(_ e: NSEvent, in w: NSWindow) -> Bool {
+        e.locationInWindow.y >= w.contentLayoutRect.maxY
+    }
+
+    /// Finestra normale finché il pulsante del mouse resta premuto (macOS gestisce il
+    /// trascinamento da sé e l'app non sempre riceve il rilascio, quindi si controlla).
+    private static func beginDrag() {
+        dragging = true
+        update()
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { t in
+            guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+            t.invalidate()
+            MainActor.assumeIsolated { dragging = false; update() }
+        }
+    }
+
+    /// Da chiamare quando cambia qualcosa che conta (inizio e fine di un ripristino).
+    static func refresh() { update() }
+
     private static func update() {
-        window?.level = (NSApp.isActive || suspended) ? .normal : .floating
+        guard let window else { return }
+        let otherWindow = NSApp.windows.contains { w in
+            w !== window && w.isVisible && !(w is NSPanel) && w.level == .normal && w.styleMask.contains(.titled)
+        }
+        let busy = Shared.restorer.isRunning
+        let level: NSWindow.Level = (suspended || dragging || otherWindow || busy || NSApp.modalWindow != nil) ? .normal : .floating
+        if window.level != level { window.level = level }
     }
 
     static func lowerUntilReactivated() {

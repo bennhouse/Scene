@@ -125,8 +125,10 @@ enum AX {
     }
 
     /// Sposta/ridimensiona solo se serve: ogni scrittura fa ridisegnare la finestra.
+    /// `sameDisplay`: la finestra resta sul suo monitor, quindi basta spostarla e poi
+    /// ridimensionarla (due passaggi invece di tre, un movimento più pulito).
     @discardableResult
-    static func setFrame(_ el: AXUIElement, _ r: CGRect) -> Bool {
+    static func setFrame(_ el: AXUIElement, _ r: CGRect, sameDisplay: Bool = false) -> Bool {
         if let f = frame(el), abs(f.minX - r.minX) <= 1, abs(f.minY - r.minY) <= 1,
            abs(f.width - r.width) <= 1, abs(f.height - r.height) <= 1 { return true }
         if let f = frame(el), abs(f.width - r.width) <= 1, abs(f.height - r.height) <= 1 {
@@ -136,11 +138,35 @@ enum AX {
         }
         var pt = r.origin, sz = r.size
         guard let pv = AXValueCreate(.cgPoint, &pt), let sv = AXValueCreate(.cgSize, &sz) else { return false }
+        if sameDisplay {
+            let e = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, pv)
+            AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sv)
+            return e == .success
+        }
         // Dimensione, posizione, ancora dimensione: necessario quando si cambia monitor.
         AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sv)
         let e = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, pv)
         AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sv)
         return e == .success
+    }
+
+    /// La finestra ha modifiche non salvate? È il pallino nel pulsante rosso (AXEdited).
+    /// Le app che salvano da sole (Pagine, TextEdit…) non lo mostrano: chiuderle non perde nulla.
+    static func isEdited(_ el: AXUIElement) -> Bool {
+        guard let b = attr(el, kAXCloseButtonAttribute) else { return false }
+        return bool(b as! AXUIElement, "AXEdited")
+    }
+
+    /// L'app sta mostrando una richiesta (per esempio «Vuoi salvare?») in una delle sue finestre?
+    static func appHasPrompt(pid: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 1.0)
+        let wins = attr(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        return wins.contains { w in
+            if [kAXDialogSubrole, kAXSystemDialogSubrole].contains(string(w, kAXSubroleAttribute) ?? "") { return true }
+            let kids = attr(w, kAXChildrenAttribute) as? [AXUIElement] ?? []
+            return kids.contains { string($0, kAXRoleAttribute) == "AXSheet" }
+        }
     }
 
     /// Chiude premendo il pulsante rosso: l'app può chiedere di salvare.

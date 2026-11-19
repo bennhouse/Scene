@@ -9,13 +9,22 @@ import Cocoa
 @MainActor
 final class Restorer: ObservableObject {
     @Published var status = ""
-    @Published var isRunning = false
+    @Published var isRunning = false { didSet { WindowLevel.refresh() } }
     /// App che stanno chiedendo qualcosa (es. salvare) prima di chiudere una finestra.
     @Published var waitingApps: [String] = []
 
     private var spaceChanges = 0
     private var observer: NSObjectProtocol?
     private var used = Set<CGWindowID>()
+    /// Finestre nate durante questo ripristino per mano di Scene (app avviate, documenti e schede
+    /// aperti). Si possono prendere anche dall'altro monitor e spostare dove servono.
+    private var ours = Set<CGWindowID>()
+    /// Finestre che esistevano già all'inizio: non sono mai doppioni da chiudere.
+    private var preexisting = Set<CGWindowID>()
+    /// Finestra usata per ogni documento della scena, per chiudere le copie arrivate in ritardo.
+    private var placedDocuments: [(bundleID: String, appName: String, path: String, id: CGWindowID)] = []
+    /// In questo ripristino si è aperta una seconda istanza di un'app per un documento.
+    private var triedNewInstance = false
     private var skipWaiting = false
     private var abortRequested = false
     private let blocker = InputBlocker.shared
@@ -52,6 +61,11 @@ final class Restorer: ObservableObject {
         }
         isRunning = true
         used = []
+        ours = []
+        placedDocuments = []
+        triedNewInstance = false
+        preexisting = Set(((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]) ?? [])
+            .compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
         abortRequested = false; skipWaiting = false
         let t0 = Date()
         blocker.begin(maxSeconds: InputBlocker.cap)
@@ -85,11 +99,23 @@ final class Restorer: ObservableObject {
                 let keep = await offMain { self.keptWindows(plan) }
                 note("Scene windows already open in place: \(keep.count)")
                 await closeEverywhere(apps: nil, keep: keep)
+            case .appsNotIncluded:
+                // Prima si chiudono le app che non fanno parte della scena (dopo aver controllato
+                // che non abbiano modifiche da salvare), poi le finestre in più di quelle che restano.
+                guard let leftOpen = await quitApps(notIn: Set(scene.windows.map(\.bundleID))) else {
+                    abortRequested = true
+                    break
+                }
+                let keep = await offMain { self.keptWindows(plan) }
+                note("Scene windows already open in place: \(keep.count)")
+                let others = Set(targetApps(nil).compactMap(\.bundleIdentifier)).subtracting(leftOpen)
+                await closeEverywhere(apps: others, keep: keep)
             }
         }
 
         // 2) Gli altri desktop, monitor per monitor.
         var failed = 0
+        if abortRequested { note("Restore stopped before opening windows") }
         outer: for d in displays {
             let ords = Set(plan.filter { $0.displayUUID == d.uuid && $0.ordinal != start[d.uuid] }.map(\.ordinal)).sorted()
             for o in ords {
@@ -124,6 +150,7 @@ final class Restorer: ObservableObject {
         if !abortRequested {
             status = "Current desktop…"
             await place(plan.filter { start[$0.displayUUID] == $0.ordinal }, allVisible: true)
+            await closeLateDuplicates()
         }
         warp(to: pointer)
 
@@ -176,6 +203,23 @@ final class Restorer: ObservableObject {
         return out.sorted()
     }
 
+    /// Prova a secco di «le app non incluse»: quali app uscirebbero e quali hanno modifiche non
+    /// salvate (solo lettura, senza cambiare desktop).
+    func describeAppsNotIncluded(_ scene: SavedScene) -> [String] {
+        let sceneApps = Set(scene.windows.map(\.bundleID))
+        return targetApps(nil).map { app in
+            let b = app.bundleIdentifier ?? ""
+            let name = app.localizedName ?? b
+            if sceneApps.contains(b) { return "KEEP \(name) (in the scene)" }
+            if b == Scripting.finder { return "KEEP \(name) (Finder: only its windows are closed)" }
+            let els = AX.allWindows(pid: app.processIdentifier)
+            let edited = els.filter(AX.isEdited).map { AX.title($0) ?? "?" }
+            let unread = cgWindows(pid: app.processIdentifier).count - els.count
+            return "QUIT \(name)" + (edited.isEmpty ? "" : " unsaved: \(edited.joined(separator: ", "))")
+                + (unread > 0 ? " (\(unread) windows not readable from here)" : "")
+        }.sorted()
+    }
+
     // MARK: - Desktop
 
     func warp(to p: CGPoint) {
@@ -193,9 +237,16 @@ final class Restorer: ObservableObject {
         var steps = 0
         while cur != target && steps < 8 {
             steps += 1
-            // Il puntatore sul monitor giusto: le scorciatoie agiscono sul monitor attivo.
-            warp(to: CGPoint(x: disp.frame.midX, y: disp.frame.midY))
-            await sleep(0.12)
+            // Il puntatore sul monitor giusto: le scorciatoie agiscono sul monitor attivo. Se è già
+            // lì resta dov'è (niente salti del puntatore a ogni desktop): basta il movimento sul posto.
+            let here = CGEvent(source: nil)?.location ?? .zero
+            if disp.frame.contains(here) {
+                warp(to: here)
+                await sleep(0.03)
+            } else {
+                warp(to: CGPoint(x: disp.frame.midX, y: disp.frame.midY))
+                await sleep(0.12)
+            }
             let before = disp.currentSpace
             let n0 = spaceChanges
             (target > cur ? Prefs.shared.right : Prefs.shared.left).post()
@@ -422,9 +473,12 @@ final class Restorer: ObservableObject {
         return claimed
     }
 
+    /// La finestra c'è ancora? Alcune app (Claude, Musica e altre) alla chiusura nascondono la
+    /// finestra invece di distruggerla: una finestra che non sta più su nessun desktop è chiusa.
     private func stillOpen(_ c: Closing) -> Bool {
         guard NSRunningApplication(processIdentifier: c.pid)?.isTerminated == false else { return false }
-        return !((CGWindowListCopyWindowInfo([.optionIncludingWindow], c.wid) as? [[String: Any]]) ?? []).isEmpty
+        guard !((CGWindowListCopyWindowInfo([.optionIncludingWindow], c.wid) as? [[String: Any]]) ?? []).isEmpty else { return false }
+        return !CGS.spaces(forWindow: c.wid).isEmpty
     }
 
     /// Preme il pulsante rosso. Se un'app chiede qualcosa (salvare, terminare un processo…)
@@ -444,7 +498,9 @@ final class Restorer: ObservableObject {
         let failed = items.filter { !accepted.contains($0.wid) && stillOpen($0) }
         for f in failed { note("\(f.app): window \(f.wid) has no usable close button") }
         let pressed = items.filter { accepted.contains($0.wid) }
-        note("Closed \(items.count - failed.count) windows")
+        var closedApps: [String] = []
+        for i in items where !failed.contains(where: { $0.wid == i.wid }) && !closedApps.contains(i.app) { closedApps.append(i.app) }
+        note("Closed \(items.count - failed.count) windows" + (closedApps.isEmpty ? "" : " (\(closedApps.joined(separator: ", ")))"))
         guard !pressed.isEmpty else { return }
         let previous = status
         var shown = Set<CGWindowID>()
@@ -498,6 +554,181 @@ final class Restorer: ObservableObject {
         await sleep(0.3)
     }
 
+    // MARK: - App non incluse
+
+    /// «Le app non incluse»: esce dalle app che non hanno finestre nella scena (il Finder no:
+    /// non si può chiudere, le sue finestre in più si chiudono dopo). Prima controlla che non
+    /// abbiano documenti con modifiche non salvate e, se ne trova, chiede cosa fare.
+    /// Restituisce le app lasciate aperte di proposito, o nil se l'utente ha fermato il ripristino.
+    private func quitApps(notIn scene: Set<String>) async -> Set<String>? {
+        let apps = targetApps(nil).filter { a in
+            guard let b = a.bundleIdentifier else { return false }
+            return !scene.contains(b) && b != Scripting.finder
+        }
+        guard !apps.isEmpty else { return [] }
+        status = "Checking for unsaved changes…"
+
+        // Finestre con il pallino nel pulsante rosso. Quelle che l'Accessibilità non raggiunge da
+        // qui si leggono passando dal loro desktop; se non si leggono neanche lì, l'app non si
+        // può controllare e lo si dice.
+        var edited: [Closing] = []
+        var unreachable: [CGSSpaceID: Set<pid_t>] = [:]
+        func name(_ pid: pid_t) -> String {
+            apps.first { $0.processIdentifier == pid }?.localizedName ?? "App"
+        }
+        for app in apps {
+            let pid = app.processIdentifier
+            let cg = cgWindows(pid: pid)
+            let els = await offMain { AX.allWindows(pid: pid) }
+            let seen = Set(els.compactMap(AX.windowID))
+            for el in els where AX.isEdited(el) {
+                if let id = AX.windowID(el) { edited.append(Closing(el: el, pid: pid, wid: id, app: name(pid))) }
+            }
+            for (wid, sp) in cg where !seen.contains(wid) { unreachable[sp, default: []].insert(pid) }
+        }
+        var unchecked = Set<pid_t>()
+        for (space, pidsThere) in unreachable.sorted(by: { $0.key < $1.key }) {
+            if abortRequested { return nil }
+            guard let (d, o) = Topology.locate(space: space, in: Topology.displays()),
+                  await switchDesktop(d.uuid, to: o) else { unchecked.formUnion(pidsThere); continue }
+            for pid in pidsThere {
+                let here = AX.windows(pid: pid).filter { el in
+                    AX.windowID(el).map { CGS.spaces(forWindow: $0).first == space } ?? false
+                }
+                if here.isEmpty { unchecked.insert(pid); continue }
+                for el in here where AX.isEdited(el) {
+                    if let id = AX.windowID(el), !edited.contains(where: { $0.wid == id }) {
+                        edited.append(Closing(el: el, pid: pid, wid: id, app: name(pid)))
+                    }
+                }
+            }
+        }
+        unchecked.subtract(edited.map(\.pid))
+
+        var leftOpen = Set<String>()
+        if !edited.isEmpty || !unchecked.isEmpty {
+            var lines: [String] = []
+            for pid in Set(edited.map(\.pid)).sorted() {
+                let titles = edited.filter { $0.pid == pid }.map { AX.title($0.el).flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled" }
+                lines.append("\(name(pid)): \(titles.joined(separator: ", "))")
+            }
+            for pid in unchecked.sorted() { lines.append("\(name(pid)): Scene couldn't check its windows") }
+            note("Unsaved changes before quitting: \(lines.joined(separator: "; "))")
+            switch askAboutUnsaved(lines) {
+            case .keepOpen:
+                for pid in Set(edited.map(\.pid)).union(unchecked) {
+                    if let b = apps.first(where: { $0.processIdentifier == pid })?.bundleIdentifier { leftOpen.insert(b) }
+                }
+            case .quitAnyway:
+                // Si chiudono prima i documenti modificati, uno per uno, così ogni app chiede di
+                // salvare dove la si vede (si passa anche dal loro desktop).
+                await closeAndWait(edited)
+            case .stop:
+                note("Restore stopped before quitting apps")
+                return nil
+            }
+        }
+
+        let toQuit = apps.filter { !leftOpen.contains($0.bundleIdentifier ?? "") && !$0.isTerminated }
+        guard !toQuit.isEmpty else { return leftOpen }
+        var names: [String] = []
+        for a in toQuit where !names.contains(a.localizedName ?? "App") { names.append(a.localizedName ?? "App") }
+        status = "Quitting \(names.count == 1 ? names[0] : "\(names.count) apps")…"
+        note("Quitting: \(names.joined(separator: ", "))" + (leftOpen.isEmpty ? "" : ", left open: \(leftOpen.sorted().joined(separator: ", "))"))
+        for a in toQuit { a.terminate() }
+
+        // Si aspetta che escano. Se un'app chiede qualcosa, il ripristino va in pausa finché
+        // non le si risponde; un'app che non esce e non chiede nulla si lascia aperta.
+        var lastPrompt = Date()
+        var paused = false
+        while !skipWaiting {
+            let running = toQuit.filter { !$0.isTerminated }
+            if running.isEmpty { break }
+            let asking = running.filter { AX.appHasPrompt(pid: $0.processIdentifier) }
+            if !asking.isEmpty {
+                lastPrompt = Date()
+                if !paused { paused = true; blocker.pause() }
+                var who: [String] = []
+                for a in asking where !who.contains(a.localizedName ?? "App") { who.append(a.localizedName ?? "App") }
+                if waitingApps != who {
+                    waitingApps = who
+                    status = "Waiting for a reply in \(who.joined(separator: ", "))"
+                    note("Waiting for: \(who.joined(separator: ", "))")
+                }
+            } else if Date().timeIntervalSince(lastPrompt) > 6 {
+                note("Did not quit: \(running.map { $0.localizedName ?? "App" }.joined(separator: ", "))")
+                break
+            }
+            await sleep(0.2)
+        }
+        if paused { blocker.resume() }
+        waitingApps = []
+        if !abortRequested { skipWaiting = false }
+        return leftOpen
+    }
+
+    private enum UnsavedChoice { case keepOpen, quitAnyway, stop }
+
+    /// Chiede cosa fare delle app con modifiche non salvate. La tastiera torna libera mentre
+    /// l'avviso è aperto.
+    private func askAboutUnsaved(_ lines: [String]) -> UnsavedChoice {
+        blocker.pause()
+        defer { blocker.resume() }
+        let alert = NSAlert()
+        alert.messageText = "Some apps have unsaved changes"
+        alert.informativeText = lines.joined(separator: "\n")
+            + "\n\nKeep them open, or quit them anyway (each app asks whether to save)?"
+        alert.addButton(withTitle: "Keep Them Open")
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Stop Restoring")
+        alert.layout()
+        // Sul desktop attuale, davanti a tutto: attivare Scene non deve portare a un altro desktop.
+        alert.window.collectionBehavior.insert(.moveToActiveSpace)
+        alert.window.level = .modalPanel
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            alert.window.makeKeyAndOrderFront(nil)
+        }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .keepOpen
+        case .alertSecondButtonReturn: return .quitAnyway
+        default: return .stop
+        }
+    }
+
+    /// Un'app lenta può aprire un documento della scena una seconda volta, in ritardo (per
+    /// esempio dopo che Scene ha provato con una seconda istanza). Le copie nate durante questo
+    /// ripristino, mai quelle che c'erano già, si chiudono.
+    private func closeLateDuplicates() async {
+        guard !placedDocuments.isEmpty else { return }
+        let deadline = Date().addingTimeInterval(triedNewInstance ? 4 : 0)
+        var closedAny = false
+        repeat {
+            let usedNow = used, before = preexisting
+            var extra: [String: (appName: String, ids: Set<CGWindowID>)] = [:]
+            for d in placedDocuments {
+                let appPids = pids(d.bundleID)
+                let ids = await offMain {
+                    appPids.flatMap { AX.allWindows(pid: $0) }.compactMap { el -> CGWindowID? in
+                        guard let id = AX.windowID(el), id != d.id, !usedNow.contains(id), !before.contains(id),
+                              AX.shows(el, document: d.path) else { return nil }
+                        return id
+                    }
+                }
+                if !ids.isEmpty {
+                    extra[d.bundleID, default: (d.appName, [])].ids.formUnion(ids)
+                    note("«\((d.path as NSString).lastPathComponent)» opened twice by \(d.appName): closing the copy")
+                }
+            }
+            for (bid, e) in extra {
+                await closeWindows(e.ids, bundleID: bid, appName: e.appName)
+                closedAny = true
+            }
+            if closedAny || Date() >= deadline { break }
+            await sleep(0.3)
+        } while true
+    }
+
     // MARK: - Apertura e posizionamento
 
     nonisolated private func pids(_ bundleID: String) -> [pid_t] {
@@ -530,13 +761,22 @@ final class Restorer: ObservableObject {
                 var pid: pid_t = 0
                 if AXUIElementGetPid(el, &pid) == .success { BrowserAX.disableEnhancedUI(pid: pid) }
             }
-            AX.setFrame(el, p.frame)
+            // Sullo stesso monitor basta spostare e poi ridimensionare: un movimento solo.
+            let sameDisplay = AX.frame(el).map { f in
+                Topology.displays().first { $0.frame.contains(CGPoint(x: f.midX, y: f.midY)) }?.uuid == p.displayUUID
+            } ?? false
+            AX.setFrame(el, p.frame, sameDisplay: sameDisplay)
             // Alcune app applicano la posizione in ritardo o la ignorano la prima volta: si ricontrolla.
             if let f = AX.frame(el), !Capture.near(f, p.frame, tol: 4) {
                 await sleep(0.25)
                 AX.setFrame(el, p.frame)
             }
-            if let id = AX.windowID(el) { used.insert(id) }
+            if let id = AX.windowID(el) {
+                used.insert(id)
+                if let doc = p.window.content.documentPath {
+                    placedDocuments.append((p.window.bundleID, p.window.appName, doc, id))
+                }
+            }
             note("OK \(p.window.appName) «\(p.window.title ?? "")» > desktop \(p.ordinal) \(Int(p.frame.minX)),\(Int(p.frame.minY)) \(Int(p.frame.width))x\(Int(p.frame.height))")
         }
     }
@@ -567,6 +807,7 @@ final class Restorer: ObservableObject {
         status = "Opening \(started.count) apps…"
         note("Launching together: \(started.joined(separator: ", "))")
         await waitAllSettled(started, timeout: 10)
+        for b in started { ours.formUnion(windowIDs(b)) }
     }
 
     /// Aspetta che queste app abbiano finito di avviarsi e che il numero delle loro finestre
@@ -617,11 +858,15 @@ final class Restorer: ObservableObject {
     }
 
     /// Finestre di tutte le istanze dell'app, sugli Space consentiti e non ancora usate.
+    /// Le finestre già esistenti valgono solo sugli Space consentiti (sull'altro monitor possono
+    /// servire a un altro passo). Quelle aperte da Scene in questo ripristino valgono su qualunque
+    /// desktop visibile: un'app può aprirle sull'altro monitor, e da lì si spostano.
     private func candidates(_ bundleID: String, allowed: Set<CGSSpaceID>) -> [AXUIElement] {
-        pids(bundleID).flatMap { AX.windows(pid: $0) }.filter { el in
+        let visible = Set(Topology.displays().map(\.currentSpace))
+        return pids(bundleID).flatMap { AX.windows(pid: $0) }.filter { el in
             guard let id = AX.windowID(el), !used.contains(id) else { return false }
             guard let s = CGS.spaces(forWindow: id).first else { return true }
-            return allowed.contains(s)
+            return allowed.contains(s) || (ours.contains(id) && visible.contains(s))
         }
     }
 
@@ -659,12 +904,17 @@ final class Restorer: ObservableObject {
                 if attempt == 1 && elsewhere.isEmpty && !appIgnoredFile { return nil }
                 // Alcune app aprono file solo all'avvio: se l'app aperta ha ignorato il file, nuova istanza.
                 let newInstance = attempt == 1 && appIgnoredFile && !pids(bid).isEmpty
-                if newInstance { note("\(w.appName) did not open the file, trying a new instance") }
+                if newInstance {
+                    note("\(w.appName) did not open the file, trying a new instance")
+                    triedNewInstance = true
+                }
                 let running = !pids(bid).isEmpty
                 let before = windowIDs(bid)
                 _ = try? await NSWorkspace.shared.open([url], withApplicationAt: app,
                                                        configuration: openConfig(newInstance: newInstance))
-                if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: running ? 4 : 8,
+                // Un'app già aperta può metterci parecchio ad aprire un file grande (WordCraft con un
+                // .docx): aspettarla abbastanza evita di aprirne una seconda istanza, e una seconda copia.
+                if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: running ? 9 : 10,
                                                target: target, match: { AX.shows($0, document: doc) }) { return n }
                 let nowAllowed = Set(Topology.displays().map(\.currentSpace))
                 let created = pids(bid).flatMap { cgWindows(pid: $0) }.filter { !before.contains($0.0) }
@@ -705,6 +955,7 @@ final class Restorer: ObservableObject {
                 // Il browser può riaprire da solo le finestre della sessione precedente:
                 // si aspetta che abbia finito prima di decidere se aprire le schede.
                 await waitWindowsSettled(bid, timeout: 6)
+                ours.formUnion(windowIDs(bid))
             }
             if bid == BrowserAX.firefox, let pid = pids(bid).first {
                 for el in candidates(bid, allowed: allowed) { await firefoxReady(el, pid: pid) }
@@ -813,12 +1064,20 @@ final class Restorer: ObservableObject {
             fresh = candidates(bid, allowed: allowed)
             if let m = fresh.first { return m }
         }
-        // L'app è aperta ma senza finestre qui. Se non ne ha su nessun desktop, attivarla
-        // non fa cambiare desktop e la fa aprire una finestra nuova (come un clic nel Dock).
-        let before = windowIDs(bid)
-        let none = before.isEmpty
-        _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: openConfig(activates: none))
-        return await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: 3, target: target)
+        // L'app è aperta ma senza finestre qui. Riaprirla (come un clic nel Dock) le fa mostrare
+        // una finestra: quella nascosta alla chiusura (Claude, Musica) o una nuova. Prima senza
+        // attivarla; se non basta, attivandola, ma solo se non ha finestre su altri desktop
+        // (attivarla porterebbe là).
+        for activate in [false, true] {
+            let before = windowIDs(bid)
+            if activate && !before.isEmpty { break }
+            _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: openConfig(activates: activate))
+            if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: 4, target: target) { return n }
+            if let m = candidates(bid, allowed: allowed).first { return m }
+        }
+        let spaces = pids(bid).flatMap { cgWindows(pid: $0) }.map { "\($0.0)@\($0.1)" }
+        note("\(w.appName): no window after reopening it (windows: \(spaces.isEmpty ? "none" : spaces.joined(separator: ", ")); allowed: \(allowed.sorted()))")
+        return nil
     }
 
     /// Aspetta che il numero di finestre dell'app smetta di cambiare (o il tempo massimo).
@@ -912,6 +1171,7 @@ final class Restorer: ObservableObject {
         while Date() < deadline {
             watcher.watch(pids(bundleID))
             await watcher.wait(upTo: 0.2)
+            ours.formUnion(windowIDs(bundleID).subtracting(before))
             if let target, Topology.display(uuid: target.uuid)?.currentOrdinal != target.ordinal {
                 _ = await ensureDesktop(target.uuid, target.ordinal)
             }

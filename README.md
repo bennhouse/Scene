@@ -18,6 +18,8 @@ macOS has no public way to move a window to another desktop, so Scene doesn't tr
 
 A desktop whose windows are already where they should be is not visited. The apps of a desktop are opened together, and Scene waits until all of them have finished opening before it moves on, so no window ends up on the wrong desktop. If a browser reopens its own windows at launch, Scene uses them instead of opening the tabs again.
 
+The Scene window stays in front of other apps' windows. It becomes a normal window while you drag it by its title bar (so you can move it to another desktop), while another Scene window is open, and while Scene restores or captures (so it never covers an app asking you to save).
+
 While Scene captures or restores, a thin outline in the colours of the scene's apps pulses around each screen, and a small panel at the top shows what it is doing.
 
 While it switches desktops, the keyboard is blocked so you can't switch desktops by accident. Trackpad swipes are blocked too. The block lasts 25 seconds at most and always ends when the restore ends or Scene quits.
@@ -25,10 +27,13 @@ While it switches desktops, the keyboard is blocked so you can't switch desktops
 Before restoring, Scene can close windows on every desktop. You can choose which:
 
 - **windows not in the scene**: windows that belong to the scene and are already on the right desktop stay open, everything else is closed
+- **apps not in the scene**: apps that have no window in the scene are quit, then the windows not in the scene are closed as above. Finder is never quit, only its windows are closed. Before quitting, Scene checks every window of those apps for unsaved changes (the dot in the close button). If it finds any, or can't read an app's windows, it lists them and asks whether to keep those apps open, quit them anyway (each app then asks whether to save) or stop.
 - **the scene's windows**: windows of the apps in the scene
 - **all windows**
 
-Windows are closed with their close button, so apps can still ask you to save. If one does, Scene pauses until you answer.
+Windows are closed with their close button, so apps can still ask you to save. If one does, Scene pauses until you answer. Apps that only hide their window when you close it (Claude, Music) count as closed, and get their window back when a scene needs it.
+
+If a slow app opens a document of the scene twice (for example because Scene tried again with a second instance), the late copy is closed at the end.
 
 A scene saved with an external monitor can be restored on the Mac alone, and the other way round. Desktop 1 and 2 of the monitor map to desktop 1 and 2 of the Mac, and windows are resized proportionally.
 
@@ -40,7 +45,7 @@ A scene saved with an external monitor can be restored on the Mac alone, and the
 
 ## Install
 
-1. Download `Scene-1.0.2.dmg` from [Releases](../../releases) and drag Scene to Applications.
+1. Download `Scene-1.1.0.dmg` from [Releases](../../releases) and drag Scene to Applications.
 2. Scene is not notarized, so macOS blocks it the first time. Open System Settings › Privacy & Security, scroll down and click **Open Anyway**. You can also clear the quarantine flag from Terminal:
    ```
    xattr -dr com.apple.quarantine /Applications/Scene.app
