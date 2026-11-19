@@ -13,10 +13,11 @@ final class ProgressOverlay {
     private var hud: NSPanel?
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    /// Terza riga: «Press Esc 3 times to stop», che diventa il contatore quando si preme Esc.
     private let hintLabel = NSTextField(labelWithString: "")
     private var statusSink: AnyCancellable?
-    private var lastStatus = ""
-    /// Fino a quando il pannello mostra il contatore di Esc invece dello stato.
+    private var hintText = ""
+    /// Fino a quando la terza riga mostra il contatore di Esc invece dell'indicazione.
     private var escapeUntil = Date.distantPast
     private var escapeStopping = false
 
@@ -24,15 +25,13 @@ final class ProgressOverlay {
         hide(animated: false)
         escapeUntil = .distantPast
         escapeStopping = false
-        hintLabel.stringValue = stopHint ? "esc ×3 to stop" : ""
+        hintText = stopHint ? "Press Esc 3 times to stop" : ""
         let colors = AppColors.average(appPaths)
         for screen in NSScreen.screens { borders.append(makeBorder(on: screen, colors: colors)) }
         let main = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hud = makeHUD(on: main, title: title)
         statusSink = status.receive(on: RunLoop.main).sink { [weak self] s in
-            guard let self else { return }
-            self.lastStatus = s
-            if Date() >= self.escapeUntil && !self.escapeStopping { self.showStatus() }
+            self?.detailLabel.stringValue = s.isEmpty ? "Please wait…" : s
         }
         for w in borders + [hud].compactMap({ $0 }) {
             w.alphaValue = 0
@@ -50,30 +49,31 @@ final class ProgressOverlay {
         }
     }
 
-    private func showStatus() {
-        detailLabel.stringValue = lastStatus.isEmpty ? "Please wait…" : lastStatus
-        detailLabel.textColor = .secondaryLabelColor
+    private func showHint() {
+        hintLabel.stringValue = hintText
+        hintLabel.textColor = .tertiaryLabelColor
     }
 
-    /// Contatore delle pressioni di Esc (1, 2 o 3) al posto dello stato: avvisa che altre
-    /// pressioni fermano il ripristino. Sparisce dopo due secondi senza altre pressioni.
+    /// Contatore delle pressioni di Esc (1, 2 o 3) nella terza riga, al posto dell'indicazione:
+    /// avvisa che altre pressioni fermano il ripristino. Torna l'indicazione dopo due secondi
+    /// senza altre pressioni.
     func showEscape(count: Int) {
         guard hud != nil else { return }
         let dots = String(repeating: "●", count: count) + String(repeating: "○", count: 3 - count)
         if count >= 3 {
             escapeStopping = true
-            detailLabel.stringValue = "\(dots)  Stopping the restore…"
+            hintLabel.stringValue = "\(dots)  Stopping the restore…"
         } else {
             let left = 3 - count
-            detailLabel.stringValue = "\(dots)  Press Esc \(left) more time\(left == 1 ? "" : "s") to stop"
+            hintLabel.stringValue = "\(dots)  Press Esc \(left) more time\(left == 1 ? "" : "s") to stop"
         }
-        detailLabel.textColor = .systemOrange
+        hintLabel.textColor = .systemOrange
         let until = Date().addingTimeInterval(2)
         escapeUntil = until
         guard count < 3 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.05) { [weak self] in
             guard let self, self.escapeUntil == until, !self.escapeStopping else { return }
-            self.showStatus()
+            self.showHint()
         }
     }
 
@@ -169,7 +169,7 @@ final class ProgressOverlay {
     }
 
     private func makeHUD(on screen: NSScreen, title: String) -> NSPanel {
-        let size = NSSize(width: 340, height: 64)
+        let size = NSSize(width: 340, height: hintText.isEmpty ? 64 : 80)
         let vf = screen.visibleFrame
         // In alto al centro, sotto la barra dei menu, senza ombra né contorno.
         let frame = NSRect(x: vf.midX - size.width / 2, y: vf.maxY - size.height - 14, width: size.width, height: size.height)
@@ -206,16 +206,11 @@ final class ProgressOverlay {
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingTail
 
-        hintLabel.font = .systemFont(ofSize: 10)
-        hintLabel.textColor = .tertiaryLabelColor
-        hintLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.lineBreakMode = .byTruncatingTail
+        showHint()
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let titleRow = NSStackView(views: [titleLabel, hintLabel])
-        titleRow.orientation = .horizontal
-        titleRow.alignment = .firstBaseline
-        titleRow.spacing = 8
-        let texts = NSStackView(views: [titleRow, detailLabel])
+        let texts = NSStackView(views: hintText.isEmpty ? [titleLabel, detailLabel] : [titleLabel, detailLabel, hintLabel])
         texts.orientation = .vertical
         texts.alignment = .leading
         texts.spacing = 2
