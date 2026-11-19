@@ -38,12 +38,18 @@ enum AX {
     static func bool(_ el: AXUIElement, _ name: String) -> Bool { (attr(el, name) as? Bool) ?? false }
 
     /// Finestre standard dell'app sul/i desktop visibili (AX non vede gli altri Space).
-    static func windows(pid: pid_t) -> [AXUIElement] {
+    /// `anyKind`: anche le finestre che l'app espone con un tipo insolito (il Project Manager di
+    /// DaVinci Resolve è un «AXUnknown» senza pulsante di chiusura).
+    static func windows(pid: pid_t, anyKind: Bool = false) -> [AXUIElement] {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 2.0)
         guard let list = attr(app, kAXWindowsAttribute) as? [AXUIElement] else { return [] }
         // Alcune app (es. Terminale) espongono le finestre normali come AXDialog.
-        return list.filter { isWindow($0) && !bool($0, kAXMinimizedAttribute) }
+        return list.filter {
+            // Di tipo insolito vale solo se ha un titolo: le schermate di caricamento non ne hanno.
+            (isWindow($0) || (anyKind && string($0, kAXRoleAttribute) == kAXWindowRole && !(title($0) ?? "").isEmpty))
+                && !bool($0, kAXMinimizedAttribute)
+        }
     }
 
     private static func isWindow(_ w: AXUIElement) -> Bool {

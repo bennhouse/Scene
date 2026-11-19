@@ -835,10 +835,22 @@ final class Restorer: ObservableObject {
     private func waitAllSettled(_ bundleIDs: [String], timeout: Double) async {
         let watcher = AXWatcher()
         defer { watcher.stop() }
-        let deadline = Date().addingTimeInterval(timeout)
+        let begin = Date()
+        let deadline = begin.addingTimeInterval(timeout)
+        // Un'app che mostra ancora la sua schermata di caricamento si aspetta più a lungo: la sua
+        // finestra arriverà su questo desktop, e andandosene prima finirebbe sul desktop sbagliato.
+        let loadingDeadline = begin.addingTimeInterval(45)
         var last: [String: Int] = [:], since: [String: Date] = [:]
-        while Date() < deadline {
+        var anyLoading = false
+        // App viste con la schermata di caricamento: restano «in caricamento» finché non compare
+        // una finestra vera, anche se nel mezzo restano per un po' senza finestre (DaVinci chiude
+        // la schermata iniziale qualche secondo prima di aprire il Project Manager).
+        var sawLoading = Set<String>()
+        let previous = status
+        defer { status = previous }
+        while Date() < (anyLoading ? loadingDeadline : deadline) {
             var done = true
+            var loading: [String] = []
             for b in bundleIDs {
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: b).filter { !$0.isTerminated }
                 watcher.watch(running.map(\.processIdentifier))
@@ -846,12 +858,43 @@ final class Restorer: ObservableObject {
                 if last[b] != n { last[b] = n; since[b] = Date() }
                 let still = Date().timeIntervalSince(since[b] ?? Date())
                 let launched = !running.isEmpty && running.allSatisfy(\.isFinishedLaunching)
-                if !(launched && still >= (n > 0 ? 0.5 : 1.5)) { done = false }
+                if launched && isLoading(b) { sawLoading.insert(b) }
+                if launched && sawLoading.contains(b) && !hasRealWindow(b) {
+                    loading.append(running.first?.localizedName ?? b)
+                    done = false
+                } else if !(launched && still >= (n > 0 ? 0.5 : 1.5)) {
+                    done = false
+                }
             }
             if done { return }
+            if !loading.isEmpty {
+                if !anyLoading { note("Still loading: \(loading.joined(separator: ", ")), waiting for its window") }
+                anyLoading = true
+                status = loading.count == 1 ? "Waiting for \(loading[0])…" : "Waiting for \(loading.count) apps…"
+            }
             await watcher.wait(upTo: 0.2)
         }
-        note("Some apps were still opening after \(Int(timeout)) s")
+        note("Some apps were still opening after \(Int(Date().timeIntervalSince(begin))) s")
+    }
+
+    /// L'app ha una finestra vera (standard), non ancora usata, su un desktop visibile?
+    private func hasRealWindow(_ bundleID: String) -> Bool {
+        let visible = Set(Topology.displays().map(\.currentSpace))
+        return pids(bundleID).flatMap { AX.windows(pid: $0, anyKind: true) }.contains { el in
+            guard let id = AX.windowID(el), !used.contains(id) else { return false }
+            return CGS.spaces(forWindow: id).first.map(visible.contains) ?? true
+        }
+    }
+
+    /// L'app mostra solo la schermata di caricamento: ha finestre sullo schermo ma ancora
+    /// nessuna finestra vera (DaVinci Resolve, per esempio, ci mette 15-20 secondi).
+    private func isLoading(_ bundleID: String) -> Bool {
+        let visible = Set(Topology.displays().map(\.currentSpace))
+        let appPids = pids(bundleID)
+        let shown = appPids.flatMap { cgWindows(pid: $0) }.filter { visible.contains($0.1) && !used.contains($0.0) }
+        guard !shown.isEmpty else { return false }
+        let real = Set(appPids.flatMap { AX.windows(pid: $0, anyKind: true) }.compactMap(AX.windowID))
+        return !shown.contains { real.contains($0.0) }
     }
 
     /// App da aprire. Una scena può arrivare da un file importato, quindi non ci si fida del
@@ -1115,6 +1158,13 @@ final class Restorer: ObservableObject {
         var fresh = candidates(bid, allowed: allowed)
         if let t = w.title, !t.isEmpty, let m = fresh.first(where: { AX.title($0) == t }) { return m }
         if let m = fresh.first(where: { AX.documentPath($0) == nil }) ?? fresh.first { return m }
+        // Nessuna finestra normale, ma una di tipo insolito sì (il Project Manager di DaVinci):
+        // si usa quella, invece di chiedere all'app di riaprirsi.
+        let visible = Set(Topology.displays().map(\.currentSpace))
+        if let m = pids(bid).flatMap({ AX.windows(pid: $0, anyKind: true) }).first(where: { el in
+            guard let id = AX.windowID(el), !used.contains(id) else { return false }
+            return CGS.spaces(forWindow: id).first.map { allowed.contains($0) || visible.contains($0) } ?? true
+        }) { return m }
         guard let app = appURL(w) else { return nil }
 
         if pids(bid).isEmpty {
