@@ -21,11 +21,14 @@ extension View {
     func tone<S: ShapeStyle>(_ style: S) -> some View { modifier(Tone(style: AnyShapeStyle(style))) }
 }
 
-/// Icone dei pulsanti della barra: sempre accese quando si possono usare (di serie macOS le
-/// mostra grigie e le accende solo al passaggio del mouse), grigio chiaro quando no.
+/// Icone dei pulsanti della barra: accese quando si possono usare (di serie macOS le mostra
+/// grigie e le accende solo al passaggio del mouse), grigio chiaro quando no. A finestra non
+/// attiva diventano dello stesso grigio del resto della finestra, come nel Finder.
 struct ToolbarDim: ViewModifier {
+    @Environment(\.controlActiveState) private var state
     @Environment(\.isEnabled) private var isEnabled
     func body(content: Content) -> some View {
-        content.foregroundStyle(isEnabled ? Color(nsColor: .labelColor) : Color(nsColor: .tertiaryLabelColor))
+        let color: Color = !isEnabled ? Tone.disabled : (state == .inactive ? Tone.inactive : Color(nsColor: .labelColor))
+        return content.foregroundStyle(color)
     }
 }

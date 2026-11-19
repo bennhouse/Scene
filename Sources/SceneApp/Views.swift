@@ -151,16 +151,16 @@ struct ContentView: View {
                     // Nessuna scena da esportare: il pulsante serve solo a importare.
                     Button { SceneFiles.importScenes(store, restorer: restorer) } label: {
                         Label("Import Scenes", systemImage: "square.and.arrow.down").toolbarIcon()
-                            .offset(y: -1.5)
+                            .offset(y: -0.5)
                     }
                     .help("Import scenes")
                 } else {
                     // Un pulsante e non un Menu di SwiftUI: macOS disegna i Menu della barra sempre
                     // grigi, gli altri pulsanti invece restano accesi.
                     Button { showExportMenu() } label: {
-                        // Il simbolo ha la freccia sopra la scatola e sembra più basso degli altri.
+                        // Allineato agli altri: stessa base della scatola del cestino.
                         Label("Export and Import", systemImage: "square.and.arrow.up").toolbarIcon()
-                            .offset(y: -2.5)
+                            .offset(y: -0.5)
                     }
                     .help("Export or import scenes")
                 }
