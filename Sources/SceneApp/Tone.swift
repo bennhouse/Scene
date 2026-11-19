@@ -21,12 +21,11 @@ extension View {
     func tone<S: ShapeStyle>(_ style: S) -> some View { modifier(Tone(style: AnyShapeStyle(style))) }
 }
 
-/// Icone dei pulsanti della barra: il loro stile ignora il colore impostato, quindi a finestra
-/// non attiva si schiariscono con la trasparenza, come il menu Esporta che macOS schiarisce da sé.
+/// Icone dei pulsanti della barra: sempre accese quando si possono usare (di serie macOS le
+/// mostra grigie e le accende solo al passaggio del mouse), grigio chiaro quando no.
 struct ToolbarDim: ViewModifier {
-    @Environment(\.controlActiveState) private var state
     @Environment(\.isEnabled) private var isEnabled
     func body(content: Content) -> some View {
-        content.opacity(state == .inactive && isEnabled ? 0.6 : 1)
+        content.foregroundStyle(isEnabled ? Color(nsColor: .labelColor) : Color(nsColor: .tertiaryLabelColor))
     }
 }

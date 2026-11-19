@@ -147,22 +147,23 @@ struct ContentView: View {
                 }
                 .disabled(selected == nil || restorer.isRunning || !CGS.supported)
                 .help("Update the selected scene with the open windows")
-                Menu {
-                    Button("Export Selected Scene…") {
-                        if let s = selected { SceneFiles.export(store, only: [s.id], suggested: s.name) }
+                if store.scenes.isEmpty {
+                    // Nessuna scena da esportare: il pulsante serve solo a importare.
+                    Button { SceneFiles.importScenes(store, restorer: restorer) } label: {
+                        Label("Import Scenes", systemImage: "square.and.arrow.down").toolbarIcon()
+                            .offset(y: -1.5)
                     }
-                    .disabled(selected == nil)
-                    Button("Export All Scenes…") { SceneFiles.export(store, only: nil, suggested: "Scene backup") }
-                        .disabled(store.scenes.isEmpty)
-                    Divider()
-                    Button("Import Scenes…") { SceneFiles.importScenes(store, restorer: restorer) }
-                } label: {
-                    // Il simbolo ha la freccia sopra la scatola e sembra più basso degli altri.
-                    Label("Export and Import", systemImage: "square.and.arrow.up").toolbarIcon()
-                        .offset(y: -2.5)
+                    .help("Import scenes")
+                } else {
+                    // Un pulsante e non un Menu di SwiftUI: macOS disegna i Menu della barra sempre
+                    // grigi, gli altri pulsanti invece restano accesi.
+                    Button { showExportMenu() } label: {
+                        // Il simbolo ha la freccia sopra la scatola e sembra più basso degli altri.
+                        Label("Export and Import", systemImage: "square.and.arrow.up").toolbarIcon()
+                            .offset(y: -2.5)
+                    }
+                    .help("Export or import scenes")
                 }
-                .menuIndicator(.hidden)
-                .help("Export or import scenes")
                 Button(role: .destructive) { confirmDelete = selected } label: {
                     Label("Delete", systemImage: "trash").toolbarIcon()
                 }
@@ -189,7 +190,7 @@ struct ContentView: View {
                         let s = await Capture.full(name: name, restorer: restorer)
                         var t = Transaction(); t.disablesAnimations = true
                         withTransaction(t) { store.add(s); selection = s.id }
-                        restorer.status = "Saved «\(name)»: \(s.windows.count) windows (\(s.config.label))"
+                        restorer.status = "Saved · \(s.windows.count) window\(s.windows.count == 1 ? "" : "s")"
                     }
                 }
             }
@@ -215,12 +216,31 @@ struct ContentView: View {
         .onAppear {
             if selection == nil { selection = store.scenes.first?.id }
             if !store.canSave {
-                restorer.status = "The scene archive could not be read. It was set aside and changes are not being saved."
+                restorer.status = "Archive unreadable · not saving"
             }
         }
     }
 
     private var selected: SavedScene? { store.scenes.first { $0.id == selection } }
+
+    /// Il menu Esporta, aperto sotto la barra degli strumenti dove si è cliccato.
+    private func showExportMenu() {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow, let content = window.contentView else { return }
+        let menu = NSMenu()
+        let current = selected
+        let store = store, restorer = restorer
+        menu.addItem(MenuAction("Export Selected Scene…", enabled: current != nil) {
+            if let s = current { SceneFiles.export(store, only: [s.id], suggested: s.name) }
+        }.item)
+        menu.addItem(MenuAction("Export All Scenes…") {
+            SceneFiles.export(store, only: nil, suggested: "Scene backup")
+        }.item)
+        menu.addItem(.separator())
+        menu.addItem(MenuAction("Import Scenes…") { SceneFiles.importScenes(store, restorer: restorer) }.item)
+        let click = NSApp.currentEvent?.locationInWindow ?? NSPoint(x: window.frame.width - 100, y: 0)
+        let point = NSPoint(x: click.x - 18, y: window.contentLayoutRect.maxY - 4)
+        menu.popUp(positioning: nil, at: content.convert(point, from: nil), in: content)
+    }
 
     private func duplicate(_ s: SavedScene?) {
         guard let s, let copy = store.duplicate(s.id) else { return }
@@ -274,7 +294,8 @@ struct ContentView: View {
                     .fixedSize()
                 Spacer()
                 if restorer.isRunning { ProgressView().controlSize(.small) }
-                Text(restorer.status).font(.callout).tone(.secondary).lineLimit(1).truncationMode(.middle)
+                Text(restorer.status).font(.callout).tone(.secondary).lineLimit(1).truncationMode(.tail)
+                    .help(restorer.status)
                     .layoutPriority(-1)
             }
             .padding(.horizontal, 12)
@@ -295,7 +316,7 @@ struct ContentView: View {
             n.id = s.id
             n.icon = s.icon
             store.replace(n)
-            restorer.status = "Updated «\(s.name)»: \(n.windows.count) windows"
+            restorer.status = "Updated · \(n.windows.count) window\(n.windows.count == 1 ? "" : "s")"
         }
     }
 }
@@ -851,4 +872,22 @@ final class WindowHelperView: NSView {
     deinit {
         for o in [observer, removal].compactMap({ $0 }) { NotificationCenter.default.removeObserver(o) }
     }
+}
+
+
+/// Voce di NSMenu che esegue una chiusura (tiene in vita sé stessa come target della voce).
+final class MenuAction: NSObject {
+    let item: NSMenuItem
+    private let action: () -> Void
+
+    init(_ title: String, enabled: Bool = true, action: @escaping () -> Void) {
+        self.action = action
+        item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        super.init()
+        item.target = self
+        item.action = enabled ? #selector(run) : nil
+        item.representedObject = self
+    }
+
+    @objc private func run() { action() }
 }

@@ -51,13 +51,13 @@ final class Restorer: ObservableObject {
     func restore(_ scene: SavedScene, closeFirst: Bool, mode: CloseMode = .scene) async {
         guard !isRunning else { return }
         guard AX.isTrusted else {
-            status = "Scene needs Accessibility access (System Settings > Privacy & Security)."
+            status = "Needs Accessibility access"
             note("Restore cancelled: Accessibility access missing")
             AX.requestTrust()
             return
         }
         guard CGS.supported else {
-            status = "Scene can't read desktops on this version of macOS, so it can't restore scenes."
+            status = "Not supported on this macOS"
             note("Restore cancelled: private APIs unavailable (\(CGS.missing.joined(separator: ", ")))")
             return
         }
@@ -131,7 +131,7 @@ final class Restorer: ObservableObject {
                     note("Desktop \(o) of \(d.name) already in place (\(ids.count) windows): not visiting it")
                     continue
                 }
-                status = "Desktop \(o), \(d.name)…"
+                status = "Desktop \(o) · \(d.isBuiltin ? "Mac" : d.name)…"
                 guard await switchDesktop(d.uuid, to: o) else {
                     note("Could not switch to desktop \(o) on \(d.name)")
                     failed += 1
@@ -142,7 +142,7 @@ final class Restorer: ObservableObject {
         }
 
         // 3) Ritorno ai desktop di partenza.
-        status = "Returning to the starting desktop…"
+        status = "Going back…"
         for d in displays {
             if let s = start[d.uuid], Topology.display(uuid: d.uuid)?.currentOrdinal != s {
                 _ = await switchDesktop(d.uuid, to: s)
@@ -151,20 +151,25 @@ final class Restorer: ObservableObject {
 
         // 4) Desktop di partenza (tutti i monitor sono visibili insieme).
         if !abortRequested {
-            status = "Current desktop…"
+            status = "This desktop…"
             await place(plan.filter { start[$0.displayUUID] == $0.ordinal }, allVisible: true)
             await closeLateDuplicates()
         }
         warp(to: pointer)
 
         let placed = used.count
+        let seconds = Date().timeIntervalSince(t0)
+        // Corto: la barra in basso è stretta quando la finestra è piccola. Il log ha i dettagli.
+        let count = placed == plan.count ? "" : " · \(placed)/\(plan.count)"
         if abortRequested {
-            status = "Restore stopped: \(placed) of \(plan.count) windows"
+            status = "Stopped · \(placed)/\(plan.count)"
+        } else if failed > 0 {
+            status = "Restored\(count) · \(failed) desktop\(failed == 1 ? "" : "s") missed"
         } else {
-            status = "Restored «\(scene.name)»: \(placed) of \(plan.count) windows in \(String(format: "%.1f", Date().timeIntervalSince(t0))) s"
-                + (failed > 0 ? ", \(failed) desktops not reached" : "")
+            status = "Restored\(count) in \(String(format: "%.0f", seconds.rounded())) s"
         }
-        note(status)
+        note("\(abortRequested ? "Restore stopped" : "Restored") «\(scene.name)»: \(placed) of \(plan.count) windows in \(String(format: "%.1f", seconds)) s"
+             + (failed > 0 ? ", \(failed) desktops not reached" : ""))
     }
 
     /// Documenti che la cattura non aveva trovato (titolo che è solo il nome del file, file non
@@ -529,7 +534,7 @@ final class Restorer: ObservableObject {
             for p in pending where !names.contains(p.app) { names.append(p.app) }
             if waitingApps != names {
                 waitingApps = names
-                status = "Waiting for a reply in \(names.joined(separator: ", "))"
+                status = names.count == 1 ? "Waiting for \(names[0])" : "Waiting for \(names.count) apps"
                 note("Waiting for: \(names.joined(separator: ", "))")
             }
             // Mostra la richiesta: se la finestra sta su un desktop non visibile, ci si sposta lì.
@@ -566,7 +571,7 @@ final class Restorer: ObservableObject {
             return !scene.contains(b) && b != Scripting.finder
         }
         guard !apps.isEmpty else { return [] }
-        status = "Checking for unsaved changes…"
+        status = "Checking for changes…"
 
         // Finestre con il pallino nel pulsante rosso. Quelle che l'Accessibilità non raggiunge da
         // qui si leggono passando dal loro desktop; se non si leggono neanche lì, l'app non si
@@ -657,7 +662,7 @@ final class Restorer: ObservableObject {
                 for a in asking where !who.contains(a.localizedName ?? "App") { who.append(a.localizedName ?? "App") }
                 if waitingApps != who {
                     waitingApps = who
-                    status = "Waiting for a reply in \(who.joined(separator: ", "))"
+                    status = who.count == 1 ? "Waiting for \(who[0])" : "Waiting for \(who.count) apps"
                     note("Waiting for: \(who.joined(separator: ", "))")
                 }
             } else if Date().timeIntervalSince(lastPrompt) > 6 {
@@ -819,7 +824,7 @@ final class Restorer: ObservableObject {
             }
         }
         guard !started.isEmpty else { return }
-        status = "Opening \(started.count) apps…"
+        status = started.count == 1 ? "Opening 1 app…" : "Opening \(started.count) apps…"
         note("Launching together: \(started.joined(separator: ", "))")
         await waitAllSettled(started, timeout: 10)
         for b in started { ours.formUnion(windowIDs(b)) }
@@ -1113,7 +1118,7 @@ final class Restorer: ObservableObject {
         guard let app = appURL(w) else { return nil }
 
         if pids(bid).isEmpty {
-            status = "Launching \(w.appName)…"
+            status = "Opening \(w.appName)…"
             let before = windowIDs(bid)
             _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: openConfig())
             if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: 8, target: target) { return n }
