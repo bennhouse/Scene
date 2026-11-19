@@ -54,6 +54,7 @@ struct SavedWindow: Codable, Hashable, Identifiable {
     var relFrame: CGRect        // frazioni del visibleFrame del monitor
     var content: WindowContent
     var zIndex: Int             // 0 = in primo piano
+    var minimized: Bool?        // ridotta nel Dock (nil nelle scene salvate prima)
 }
 
 struct SavedScene: Codable, Identifiable, Hashable {

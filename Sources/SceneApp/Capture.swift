@@ -97,14 +97,17 @@ enum Capture {
         var axByWID: [CGWindowID: (title: String?, doc: String?)] = [:]
         // Finestre di documenti mai salvati: non si cerca un file dal loro titolo.
         var unsaved = Set<CGWindowID>()
+        // Finestre ridotte nel Dock: si salvano con titolo e documento, e tornano ridotte.
+        var minimized = Set<CGWindowID>()
         var axFramesByPID: [pid_t: [(CGRect, String?, String?)]] = [:]
         if AX.isTrusted {
             for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier != ownPID {
-                for w in AX.windows(pid: app.processIdentifier) {
+                for w in AX.windows(pid: app.processIdentifier, minimized: true) {
                     let t = AX.title(w), d = AX.documentPath(w)
                     if let wid = AX.windowID(w) {
                         axByWID[wid] = (t, d)
                         if AX.isUnsavedDocument(w) { unsaved.insert(wid) }
+                        if AX.bool(w, kAXMinimizedAttribute) { minimized.insert(wid) }
                     }
                     if let f = AX.frame(w) { axFramesByPID[app.processIdentifier, default: []].append((f, t, d)) }
                 }
@@ -202,7 +205,8 @@ enum Capture {
                                        appPath: appURL.path, title: title,
                                        displayUUID: disp.uuid, displayIsBuiltin: disp.isBuiltin,
                                        desktopOrdinal: ordinal, frame: bounds, relFrame: rel,
-                                       content: content, zIndex: z)
+                                       content: content, zIndex: z,
+                                       minimized: minimized.contains(wid) ? true : nil)
             windows.append(saved)
             windowIDs[saved.id] = wid
             z += 1

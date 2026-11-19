@@ -40,7 +40,8 @@ enum AX {
     /// Finestre standard dell'app sul/i desktop visibili (AX non vede gli altri Space).
     /// `anyKind`: anche le finestre che l'app espone con un tipo insolito (il Project Manager di
     /// DaVinci Resolve è un «AXUnknown» senza pulsante di chiusura).
-    static func windows(pid: pid_t, anyKind: Bool = false) -> [AXUIElement] {
+    /// `minimized`: anche le finestre ridotte nel Dock.
+    static func windows(pid: pid_t, anyKind: Bool = false, minimized: Bool = false) -> [AXUIElement] {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 2.0)
         guard let list = attr(app, kAXWindowsAttribute) as? [AXUIElement] else { return [] }
@@ -48,8 +49,14 @@ enum AX {
         return list.filter {
             // Di tipo insolito vale solo se ha un titolo: le schermate di caricamento non ne hanno.
             (isWindow($0) || (anyKind && string($0, kAXRoleAttribute) == kAXWindowRole && !(title($0) ?? "").isEmpty))
-                && !bool($0, kAXMinimizedAttribute)
+                && (minimized || !bool($0, kAXMinimizedAttribute)) && !isFilePanel($0)
         }
+    }
+
+    /// I pannelli Apri e Salva non sono finestre di documenti: Anteprima, per esempio, mostra
+    /// «Apri» quando parte senza file, e non va scambiato per una finestra della scena.
+    static func isFilePanel(_ w: AXUIElement) -> Bool {
+        ["open-panel", "save-panel"].contains(string(w, kAXIdentifierAttribute) ?? "")
     }
 
     private static func isWindow(_ w: AXUIElement) -> Bool {

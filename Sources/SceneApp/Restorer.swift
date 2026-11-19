@@ -859,6 +859,12 @@ final class Restorer: ObservableObject {
                 var pid: pid_t = 0
                 if AXUIElementGetPid(el, &pid) == .success { BrowserAX.disableEnhancedUI(pid: pid) }
             }
+            // Una finestra ridotta nel Dock si riapre per sistemarla (e si riduce di nuovo dopo,
+            // se nella scena era ridotta).
+            if AX.bool(el, kAXMinimizedAttribute) {
+                AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+                await sleep(0.4)
+            }
             // Sullo stesso monitor basta spostare e poi ridimensionare: un movimento solo.
             let sameDisplay = AX.frame(el).map { f in
                 Topology.displays().first { $0.frame.contains(CGPoint(x: f.midX, y: f.midY)) }?.uuid == p.displayUUID
@@ -868,6 +874,9 @@ final class Restorer: ObservableObject {
             if let f = AX.frame(el), !Capture.near(f, p.frame, tol: 4) {
                 await sleep(0.25)
                 AX.setFrame(el, p.frame)
+            }
+            if p.window.minimized == true {
+                AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
             }
             if let id = AX.windowID(el) {
                 used.insert(id)
@@ -1006,7 +1015,7 @@ final class Restorer: ObservableObject {
     /// desktop visibile: un'app può aprirle sull'altro monitor, e da lì si spostano.
     private func candidates(_ bundleID: String, allowed: Set<CGSSpaceID>) -> [AXUIElement] {
         let visible = Set(Topology.displays().map(\.currentSpace))
-        return pids(bundleID).flatMap { AX.windows(pid: $0) }.filter { el in
+        return pids(bundleID).flatMap { AX.windows(pid: $0, minimized: true) }.filter { el in
             guard let id = AX.windowID(el), !used.contains(id) else { return false }
             guard let s = CGS.spaces(forWindow: id).first else { return true }
             return allowed.contains(s) || (ours.contains(id) && visible.contains(s))
