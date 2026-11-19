@@ -61,15 +61,56 @@ enum BrowserAX {
         AXUIElementPerformAction(tabs[index - 1], kAXPressAction as CFString)
     }
 
-    /// Apre una finestra di Firefox con quelle schede (comando remoto all'istanza aperta).
-    static func runFirefox(app: URL, _ args: [String]) {
-        // Solo il vero Firefox: identificativo verificato e eseguibile dichiarato dal suo bundle.
-        guard let b = Bundle(url: app), b.bundleIdentifier == firefox, let exe = b.executableURL else { return }
-        let p = Process()
-        p.executableURL = exe
-        p.arguments = args
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
+    /// Voce di menu dell'app con scorciatoia ⌘ + lettera (senza altri modificatori), cercata
+    /// per scorciatoia e non per nome, così funziona in ogni lingua.
+    static func menuItem(pid: pid_t, cmdChar: String) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 1.0)
+        guard let barRef = AX.attr(app, kAXMenuBarAttribute) else { return nil }
+        let bar = barRef as! AXUIElement
+        func search(_ menu: AXUIElement) -> AXUIElement? {
+            kids(menu).first { item in
+                (AX.attr(item, kAXMenuItemCmdCharAttribute) as? String)?.uppercased() == cmdChar.uppercased()
+                    && (AX.attr(item, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue == 0
+                    && AX.bool(item, kAXEnabledAttribute)
+            }
+        }
+        let tops = kids(bar)
+        for top in tops { for menu in kids(top) { if let i = search(menu) { return i } } }
+        // Firefox riempie i menu solo quando vengono aperti: si apre per un attimo il menu File
+        // (terzo della barra, dopo Apple e il nome dell'app) e si cerca lì.
+        guard tops.count > 2, let menu = kids(tops[2]).first else { return nil }
+        press(tops[2])
+        usleep(150_000)
+        if let i = search(menu) { return i }   // premerla chiude anche il menu
+        AXUIElementPerformAction(menu, kAXCancelAction as CFString)
+        return nil
+    }
+
+    /// Firefox appena avviato non espone schede e pagine all'Accessibilità finché un client non
+    /// lo chiede. Questa richiesta (la stessa delle utilità di sistema) lo fa partire.
+    static func enableAccessibility(pid: pid_t) {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+
+    /// Da spegnere appena finito con le schede: finché è accesa Firefox ignora i cambi di
+    /// posizione e dimensione fatti via Accessibilità (la finestra resterebbe dov'è).
+    static func disableEnhancedUI(pid: pid_t) {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+    }
+
+    /// Chiude una scheda con la sua crocetta (il primo pulsante dentro la scheda). Funziona anche
+    /// quando Firefox non è l'app attiva, a differenza della voce di menu.
+    @discardableResult
+    static func closeTab(_ tab: AXUIElement) -> Bool {
+        guard let b = kids(tab).first(where: { AX.string($0, kAXRoleAttribute) == kAXButtonRole }) else { return false }
+        return press(b)
+    }
+
+    @discardableResult
+    static func press(_ el: AXUIElement) -> Bool {
+        AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
     }
 }

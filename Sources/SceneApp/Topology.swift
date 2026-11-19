@@ -32,7 +32,9 @@ enum Topology {
         CGRect(x: r.minX, y: primaryHeight - r.maxY, width: r.width, height: r.height)
     }
 
-    static func displays() -> [DisplayInfo] {
+    static func displays() -> [DisplayInfo] { MainThread.sync { readDisplays() } }
+
+    private static func readDisplays() -> [DisplayInfo] {
         var ids = [CGDirectDisplayID](repeating: 0, count: 16)
         var n: UInt32 = 0
         CGGetActiveDisplayList(16, &ids, &n)

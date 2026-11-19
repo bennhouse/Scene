@@ -12,6 +12,7 @@ struct SceneMain: App {
         // la ridimensiona, SwiftUI salva la sua larghezza con la stessa chiave e vale quella.
         let key = "NSSplitView Subview Frames main, SidebarNavigationSplitView"
         let d = UserDefaults.standard
+        Shared.firstLaunch = d.object(forKey: "NSWindow Frame main") == nil
         if d.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?[key] == nil {
             d.set(["0.000000, 0.000000, 200.000000, 540.000000, NO, NO",
                    "201.000000, 0.000000, 659.000000, 540.000000, NO, NO"], forKey: key)
@@ -25,12 +26,18 @@ struct SceneMain: App {
                 .environmentObject(restorer)
                 .environmentObject(prefs)
         }
-        .defaultSize(width: 860, height: 540)
+        .defaultSize(width: 760, height: 480)
+        // Il contenuto decide solo la misura minima: altrimenti al primo avvio la finestra si
+        // allunga fino all'altezza di tutto l'elenco delle finestre della scena.
+        .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Permissions…") { NotificationCenter.default.post(name: .showWelcome, object: nil) }
+            }
             CommandGroup(replacing: .importExport) {
                 Button("Import Scenes…") { SceneFiles.importScenes(Shared.store, restorer: Shared.restorer) }
-                Button("Export All Scenes…") { SceneFiles.export(Shared.store, only: nil, suggested: "Scene") }
+                Button("Export All Scenes…") { SceneFiles.export(Shared.store, only: nil, suggested: "Scene backup") }
             }
         }
 
@@ -44,6 +51,8 @@ struct SceneMain: App {
 enum Shared {
     static let store = SceneStore()
     static let restorer = Restorer()
+    /// Nessuna posizione salvata per la finestra: è il primo avvio.
+    static var firstLaunch = false
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -61,9 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)   // icona nel Dock, nessuna voce nella menubar
         if CLI.args.count > 1 {
             Task { @MainActor in await CLI.run(store: Shared.store, restorer: Shared.restorer) }
-        } else if !AX.isTrusted {
+        } else if !AX.isTrusted && UserDefaults.standard.bool(forKey: Permissions.welcomeKey) {
+            // Al primo avvio i permessi li chiede la schermata di benvenuto.
             AX.requestTrust()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        InputBlocker.shared.end()   // la tastiera torna libera anche se si esce durante un ripristino
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

@@ -54,6 +54,23 @@ final class SceneStore: ObservableObject {
 
     func add(_ s: SavedScene) { scenes.insert(s, at: 0); persist() }
 
+    /// Copia della scena subito sotto l'originale, con un nome libero («Nome copy», «Nome copy 2»…).
+    @discardableResult
+    func duplicate(_ id: UUID) -> SavedScene? {
+        guard let i = scenes.firstIndex(where: { $0.id == id }) else { return nil }
+        var copy = scenes[i]
+        copy.id = UUID()
+        // Come il Finder: la copia di «Nome copy» è «Nome copy 2», non «Nome copy copy».
+        let root = copy.name.replacingOccurrences(of: #" copy( \d+)?$"#, with: "", options: .regularExpression)
+        let base = "\(root) copy"
+        var name = base, n = 2
+        while scenes.contains(where: { $0.name == name }) { name = "\(base) \(n)"; n += 1 }
+        copy.name = name
+        scenes.insert(copy, at: i + 1)
+        persist()
+        return copy
+    }
+
     func replace(_ s: SavedScene) {
         guard let i = scenes.firstIndex(where: { $0.id == s.id }) else { return }
         scenes[i] = s; persist()

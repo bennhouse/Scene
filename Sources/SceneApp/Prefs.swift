@@ -60,15 +60,26 @@ struct Shortcut: Codable, Equatable {
         self.init(keyCode: event.keyCode, flags: f.rawValue, display: s)
     }
 
+    /// Preme la scorciatoia come farebbe una persona: modificatori giù, tasto giù e su, modificatori su.
+    /// Il rilascio dei modificatori è indispensabile: senza, macOS li considera ancora premuti e
+    /// un'app che si avvia in quel momento lo vede (Firefox con ⌥ premuto parte in Troubleshoot Mode).
     func post() {
         let src = CGEventSource(stateID: .hidSystemState)
-        let flags = CGEventFlags(rawValue: flags)
-        for down in [true, false] {
-            guard let e = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: down) else { continue }
+        let all = CGEventFlags(rawValue: flags)
+        let modifiers: [(CGEventFlags, CGKeyCode)] = [(.maskControl, 59), (.maskAlternate, 58),
+                                                      (.maskShift, 56), (.maskCommand, 55)]
+            .filter { all.contains($0.0) }
+        func send(_ key: CGKeyCode, down: Bool, flags: CGEventFlags) {
+            guard let e = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: down) else { return }
             e.flags = flags
             e.setIntegerValueField(.eventSourceUserData, value: InputBlocker.marker)
             e.post(tap: .cghidEventTap)
         }
+        var held = CGEventFlags()
+        for (flag, key) in modifiers { held.insert(flag); send(key, down: true, flags: held) }
+        send(keyCode, down: true, flags: all)
+        send(keyCode, down: false, flags: all)
+        for (flag, key) in modifiers.reversed() { held.remove(flag); send(key, down: false, flags: held) }
     }
 }
 

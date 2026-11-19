@@ -2,14 +2,14 @@ import Cocoa
 
 /// Blocca tastiera e gesti del trackpad mentre Scene cambia desktop, così l'utente non può
 /// spostarsi di desktop a metà ripristino. Gli eventi generati da Scene portano un marcatore
-/// e passano. Tetto massimo di 8 secondi per ripristino; il blocco sparisce comunque se
+/// e passano. Tetto massimo di 25 secondi per ripristino; il blocco sparisce comunque se
 /// l'app termina o va in crash, perché l'event tap vive nel processo.
 /// Tap e timer girano su un thread dedicato: funzionano anche se il main thread è occupato.
 final class InputBlocker {
     static let shared = InputBlocker()
     static let marker: Int64 = 0x5CE1E
     /// Tetto del blocco per ogni ripristino, in secondi.
-    static var cap: TimeInterval = 8
+    static var cap: TimeInterval = 25
 
     /// Tastiera + gesti (29 = gesture, 30 = dock swipe: i cambi desktop col trackpad).
     private static let mask: CGEventMask =
@@ -27,7 +27,7 @@ final class InputBlocker {
     private init() {}
 
     /// Inizia un nuovo ripristino: azzera il tempo disponibile.
-    func begin(maxSeconds: TimeInterval = 8) {
+    func begin(maxSeconds: TimeInterval = 25) {
         lock.lock(); budget = maxSeconds; lock.unlock()
         resume()
     }

@@ -1,7 +1,8 @@
 import Cocoa
 
-/// Per le app che non espongono AXDocument (es. PdfCraft, WordCraft) ricava il file
-/// aperto dal titolo della finestra, cercandolo con Spotlight.
+/// Per le app che non espongono AXDocument (es. PdfCraft, WordCraft, GridCraft) ricava il file
+/// aperto dal titolo della finestra, cercandolo con Spotlight. Il titolo può essere «file — App»
+/// oppure solo il nome del file («Conti.xlsx»).
 enum DocResolver {
     private static let separators = [" \u{2014} ", " \u{2013} ", " - ", " | "]
 
@@ -29,6 +30,16 @@ enum DocResolver {
         }.prefix(6))
     }
 
+    /// Titoli di documenti mai salvati: non corrispondono a un file.
+    private static let placeholders = ["Untitled", "Senza titolo", "Sans titre", "Ohne Titel", "Sin título"]
+
+    /// Il titolo sembra il nome di un file (ha un'estensione, anche prima di « — App»)?
+    static func looksLikeFile(_ title: String) -> Bool {
+        let first = separators.reduce(title) { $0.components(separatedBy: $1).first ?? $0 }
+        let ext = (first.trimmingCharacters(in: .whitespaces) as NSString).pathExtension
+        return (1...5).contains(ext.count) && ext.allSatisfy { $0.isLetter || $0.isNumber }
+    }
+
     /// Browser e web app: il titolo è quello della pagina, non di un file.
     private static let browsers = ["org.mozilla.firefox", "com.google.Chrome", "com.apple.Safari",
                                    "company.thebrowser.Browser", "com.microsoft.edgemac", "com.brave.Browser",
@@ -39,10 +50,15 @@ enum DocResolver {
         if browsers.contains(bid) || bid.hasPrefix("com.apple.Safari.WebApp") || bid.hasPrefix("com.google.Chrome.app.") {
             return nil
         }
-        let hasSeparator = separators.contains { title.contains($0) }
-        guard hasSeparator else { return nil }
-        for name in names(in: title, appName: appName) {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        guard t.count >= 3, !placeholders.contains(where: { t.localizedCaseInsensitiveContains($0) }) else { return nil }
+        let hasSeparator = separators.contains { t.contains($0) }
+        // Titolo senza separatori: è il nome del file. Con estensione basta che l'app sappia aprirlo;
+        // senza estensione serve un solo file con quel nome, per non riaprire il file sbagliato.
+        let candidates = hasSeparator ? names(in: t, appName: appName) : [t]
+        for name in candidates {
             let hits = spotlight(name).filter { canOpen(appURL, $0) }
+            if !hasSeparator && (name as NSString).pathExtension.isEmpty && hits.count != 1 { continue }
             if let best = hits.max(by: { lastUsed($0) < lastUsed($1) }) { return best.path }
         }
         return nil

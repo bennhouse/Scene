@@ -55,7 +55,9 @@ final class Restorer: ObservableObject {
         abortRequested = false; skipWaiting = false
         let t0 = Date()
         blocker.begin(maxSeconds: InputBlocker.cap)
-        defer { blocker.end(); isRunning = false }
+        ProgressOverlay.shared.show(title: "Restoring «\(scene.name)»", status: $status,
+                                   appPaths: scene.windows.map(\.appPath))
+        defer { blocker.end(); isRunning = false; ProgressOverlay.shared.hide() }
 
         let displays = Topology.displays()
         let start = Dictionary(uniqueKeysWithValues: displays.map { ($0.uuid, $0.currentOrdinal ?? 1) })
@@ -65,12 +67,14 @@ final class Restorer: ObservableObject {
                                   desktopCount: $0.desktopCount, currentOrdinal: $0.currentOrdinal ?? 1)
         }
         // Dalla più arretrata alla più in primo piano.
-        let plan = Mapping.plan(scene, on: targets).sorted { $0.window.zIndex > $1.window.zIndex }
+        let plan = await resolveMissingDocuments(
+            Mapping.plan(scene, on: targets).sorted { $0.window.zIndex > $1.window.zIndex })
         note("Restoring «\(scene.name)» [\(scene.config.label) > \(Topology.config(of: displays).label)], \(plan.count) windows, close first: \(closeFirst ? mode.label : "no")")
 
         // 1) Chiusura su tutti i desktop. Se l'Accessibilità non risponde non si chiude nulla:
         // senza poter leggere le finestre non si saprebbe quali tenere.
-        if closeFirst && !AX.waitResponsive() {
+        let axResponds = closeFirst ? await offMain { AX.waitResponsive() } : true
+        if closeFirst && !axResponds {
             note("Accessibility not responding: closing windows skipped")
         } else if closeFirst {
             status = "Closing windows…"
@@ -78,7 +82,7 @@ final class Restorer: ObservableObject {
             case .scene: await closeEverywhere(apps: Set(scene.windows.map(\.bundleID)))
             case .all: await closeEverywhere(apps: nil)
             case .notIncluded:
-                let keep = keptWindows(plan)
+                let keep = await offMain { self.keptWindows(plan) }
                 note("Scene windows already open in place: \(keep.count)")
                 await closeEverywhere(apps: nil, keep: keep)
             }
@@ -90,13 +94,21 @@ final class Restorer: ObservableObject {
             let ords = Set(plan.filter { $0.displayUUID == d.uuid && $0.ordinal != start[d.uuid] }.map(\.ordinal)).sorted()
             for o in ords {
                 if abortRequested { break outer }
+                let items = plan.filter { $0.displayUUID == d.uuid && $0.ordinal == o }
+                // Tutto già al suo posto: non serve visitare quel desktop.
+                let alreadyUsed = used
+                if let ids = await offMain({ self.alreadyInPlace(items, used: alreadyUsed) }) {
+                    used.formUnion(ids)
+                    note("Desktop \(o) of \(d.name) already in place (\(ids.count) windows): not visiting it")
+                    continue
+                }
                 status = "Desktop \(o), \(d.name)…"
                 guard await switchDesktop(d.uuid, to: o) else {
                     note("Could not switch to desktop \(o) on \(d.name)")
                     failed += 1
                     continue
                 }
-                await place(plan.filter { $0.displayUUID == d.uuid && $0.ordinal == o })
+                await place(items)
             }
         }
 
@@ -123,6 +135,26 @@ final class Restorer: ObservableObject {
                 + (failed > 0 ? ", \(failed) desktops not reached" : "")
         }
         note(status)
+    }
+
+    /// Documenti che la cattura non aveva trovato (titolo che è solo il nome del file, file non
+    /// ancora indicizzato…): si riprova dal titolo con Spotlight, una volta sola per tutta la scena.
+    /// Così l'app si apre direttamente con il suo file invece che con un documento nuovo.
+    private func resolveMissingDocuments(_ plan: [Mapping.Placement]) async -> [Mapping.Placement] {
+        await offMain {
+            plan.map { p in
+                var p = p
+                let w = p.window, c = w.content
+                guard c.documentPath == nil, c.folderPath == nil, (c.urls ?? []).isEmpty,
+                      let t = w.title, DocResolver.looksLikeFile(t),
+                      let path = DocResolver.resolve(title: t, appName: w.appName,
+                                                     appURL: URL(fileURLWithPath: w.appPath)) else { return p }
+                p.window.content.documentPath = path
+                p.window.content.documentFromTitle = true
+                Log.write("\(w.appName): document found from the window title: \((path as NSString).lastPathComponent)")
+                return p
+            }
+        }
     }
 
     /// Prova a secco di «le finestre non incluse»: elenca cosa resterebbe e cosa verrebbe chiuso.
@@ -185,7 +217,7 @@ final class Restorer: ObservableObject {
         return cur == target
     }
 
-    /// Prima di aprire o posizionare: se il desktop è cambiato (es. dopo il tetto degli 8 s), ci torna.
+    /// Prima di aprire o posizionare: se il desktop è cambiato (es. dopo il tetto dei 25 s), ci torna.
     private func ensureDesktop(_ uuid: String, _ ordinal: Int) async -> Bool {
         if Topology.display(uuid: uuid)?.currentOrdinal == ordinal { return true }
         note("Desktop changed during restore, going back to desktop \(ordinal)")
@@ -202,7 +234,7 @@ final class Restorer: ObservableObject {
     }
 
     /// Finestre "vere" (livello 0, non minuscole) di un processo, con il loro Space.
-    private func cgWindows(pid: pid_t) -> [(CGWindowID, CGSSpaceID)] {
+    nonisolated private func cgWindows(pid: pid_t) -> [(CGWindowID, CGSSpaceID)] {
         let info = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
                     as? [[String: Any]]) ?? []
         return info.compactMap { w in
@@ -239,7 +271,7 @@ final class Restorer: ObservableObject {
             let cg = cgWindows(pid: pid).filter { userSpaces.contains($0.1) && !keep.contains($0.0) }
             guard !cg.isEmpty else { continue }
             var found = Set<CGWindowID>()
-            for w in AX.allWindows(pid: pid) {
+            for w in await offMain({ AX.allWindows(pid: pid) }) {
                 guard let id = AX.windowID(w), !keep.contains(id),
                       let sp = CGS.spaces(forWindow: id).first, userSpaces.contains(sp) else { continue }
                 found.insert(id)
@@ -271,7 +303,7 @@ final class Restorer: ObservableObject {
         var remaining = ids
         var items: [Closing] = []
         for pid in pids(bundleID) {
-            for el in AX.allWindows(pid: pid) {
+            for el in await offMain({ AX.allWindows(pid: pid) }) {
                 guard let id = AX.windowID(el), remaining.contains(id) else { continue }
                 items.append(Closing(el: el, pid: pid, wid: id, app: appName))
                 remaining.remove(id)
@@ -292,8 +324,9 @@ final class Restorer: ObservableObject {
 
     /// «Le finestre non incluse»: le finestre già aperte che corrispondono a una finestra della
     /// scena e stanno già sul desktop giusto. Queste restano; il resto viene chiuso.
-    private func keptWindows(_ plan: [Mapping.Placement]) -> Set<CGWindowID> {
+    nonisolated private func keptWindows(_ plan: [Mapping.Placement]) -> Set<CGWindowID> {
         let ds = Topology.displays()
+        let scripted = Restorer.browserWindows(for: plan)
         var kept = Set<CGWindowID>()
         var generic: [(Mapping.Placement, [CGWindowID])] = []
         for p in plan {
@@ -306,18 +339,8 @@ final class Restorer: ObservableObject {
                 ids += cgWindows(pid: pid).filter { $0.1 == space && !kept.contains($0.0) }.map(\.0)
                 for el in AX.allWindows(pid: pid) { if let id = AX.windowID(el) { els[id] = el } }
             }
-            let w = p.window, c = w.content
-            let match: (AXUIElement) -> Bool
-            if let doc = c.documentPath {
-                match = { AX.shows($0, document: doc) }
-            } else if let path = c.folderPath {
-                let name = FileManager.default.displayName(atPath: path)
-                match = { AX.title($0) == name || AX.title($0) == w.title }
-            } else if let t = w.title, !t.isEmpty {
-                match = { AX.title($0) == t }
-            } else {
-                match = { _ in false }
-            }
+            let c = p.window.content
+            let match = matcher(p.window, scripted: scripted)
             if let id = ids.first(where: { els[$0].map(match) ?? false }) {
                 kept.insert(id)
             } else if let id = ids.first(where: { els[$0] == nil && !kept.contains($0) }) {
@@ -333,6 +356,72 @@ final class Restorer: ObservableObject {
         return kept
     }
 
+    /// Finestre di Safari e Chrome lette una volta sola (con le loro schede), solo se la scena ne ha.
+    nonisolated static func browserWindows(for plan: [Mapping.Placement]) -> [String: [Scripting.ScriptWindow]] {
+        var out: [String: [Scripting.ScriptWindow]] = [:]
+        let apps = Set(plan.filter { !($0.window.content.urls ?? []).isEmpty }.map(\.window.bundleID))
+        if apps.contains(Scripting.chrome) { out[Scripting.chrome] = Scripting.chromeWindows() }
+        if apps.contains(Scripting.safari) { out[Scripting.safari] = Scripting.safariWindows() }
+        return out
+    }
+
+    /// La finestra AX corrisponde a questa finestra salvata? (documento, cartella o titolo)
+    nonisolated private func matcher(_ w: SavedWindow,
+                                     scripted: [String: [Scripting.ScriptWindow]] = [:]) -> (AXUIElement) -> Bool {
+        let c = w.content
+        if let doc = c.documentPath { return { AX.shows($0, document: doc) } }
+        // Safari e Chrome: il titolo cambia con la pagina (o con «riproduzione audio»), le schede no.
+        // È la stessa finestra se ha almeno metà delle schede della scena.
+        if let urls = c.urls, !urls.isEmpty, let script = scripted[w.bundleID] {
+            let want = Set(urls.map(Restorer.normalizedURL))
+            let need = max(1, (want.count + 1) / 2)
+            return { el in
+                guard let f = AX.frame(el),
+                      let sw = script.first(where: { Capture.near($0.bounds, f, tol: 12) }) else { return false }
+                return sw.incognito == (c.privateWindow == true)
+                    && Set(sw.urls.map(Restorer.normalizedURL)).intersection(want).count >= need
+            }
+        }
+        if let path = c.folderPath {
+            let name = FileManager.default.displayName(atPath: path)
+            return { AX.title($0) == name || AX.title($0) == w.title }
+        }
+        if let t = w.title, !t.isEmpty { return { AX.title($0) == t } }
+        return { _ in false }
+    }
+
+    /// Le finestre di questo desktop ci sono già tutte, nella posizione e dimensione giuste?
+    /// Se sì, restituisce i loro id; basta una finestra mancante o fuori posto per dire no.
+    nonisolated private func alreadyInPlace(_ items: [Mapping.Placement], used: Set<CGWindowID>) -> Set<CGWindowID>? {
+        guard !items.isEmpty else { return nil }
+        let ds = Topology.displays()
+        let scripted = Restorer.browserWindows(for: items)
+        var claimed = Set<CGWindowID>()
+        var cache: [pid_t: [AXUIElement]] = [:]
+        for p in items {
+            guard let d = ds.first(where: { $0.uuid == p.displayUUID }),
+                  p.ordinal >= 1, p.ordinal <= d.desktopSpaces.count else { return nil }
+            let space = d.desktopSpaces[p.ordinal - 1]
+            var els: [AXUIElement] = []
+            for pid in pids(p.window.bundleID) {
+                if cache[pid] == nil { cache[pid] = AX.allWindows(pid: pid) }
+                els += cache[pid]!
+            }
+            let here = els.filter { el in
+                guard let id = AX.windowID(el), !used.contains(id), !claimed.contains(id) else { return false }
+                return CGS.spaces(forWindow: id).first == space
+                    && AX.frame(el).map { Capture.near($0, p.frame, tol: 8) } == true
+            }
+            let match = matcher(p.window, scripted: scripted)
+            // Finestra senza contenuto né titolo: va bene una qualunque dell'app.
+            let generic = p.window.content.isEmpty && (p.window.title ?? "").isEmpty
+            guard let el = here.first(where: match) ?? (generic ? here.first : nil),
+                  let id = AX.windowID(el) else { return nil }
+            claimed.insert(id)
+        }
+        return claimed
+    }
+
     private func stillOpen(_ c: Closing) -> Bool {
         guard NSRunningApplication(processIdentifier: c.pid)?.isTerminated == false else { return false }
         return !((CGWindowListCopyWindowInfo([.optionIncludingWindow], c.wid) as? [[String: Any]]) ?? []).isEmpty
@@ -344,7 +433,12 @@ final class Restorer: ObservableObject {
         guard !items.isEmpty else { return }
         var accepted = Set<CGWindowID>()
         for i in items where AX.close(i.el) { accepted.insert(i.wid) }
-        await sleep(0.7)
+        // Fino a 0,7 s, ma si prosegue appena le finestre premute sono sparite.
+        let closeDeadline = Date().addingTimeInterval(0.7)
+        await sleep(0.1)
+        while Date() < closeDeadline && items.contains(where: { accepted.contains($0.wid) && stillOpen($0) }) {
+            await sleep(0.05)
+        }
         // Alcune app terminano chiudendo l'ultima finestra e l'azione AX risponde con un errore:
         // conta il risultato, cioè se la finestra c'è ancora.
         let failed = items.filter { !accepted.contains($0.wid) && stillOpen($0) }
@@ -406,7 +500,7 @@ final class Restorer: ObservableObject {
 
     // MARK: - Apertura e posizionamento
 
-    private func pids(_ bundleID: String) -> [pid_t] {
+    nonisolated private func pids(_ bundleID: String) -> [pid_t] {
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .filter { !$0.isTerminated }.map(\.processIdentifier)
     }
@@ -418,6 +512,7 @@ final class Restorer: ObservableObject {
     }
 
     private func place(_ items: [Mapping.Placement], allVisible: Bool = false) async {
+        await launchTogether(items)
         for p in items {
             if abortRequested { return }
             guard await ensureDesktop(p.displayUUID, p.ordinal) else { continue }
@@ -431,10 +526,71 @@ final class Restorer: ObservableObject {
                !Set(Topology.displays().map(\.currentSpace)).contains(sp) {
                 note("\(p.window.appName) window is on another desktop, skipping it"); continue
             }
+            if p.window.bundleID == BrowserAX.firefox {
+                var pid: pid_t = 0
+                if AXUIElementGetPid(el, &pid) == .success { BrowserAX.disableEnhancedUI(pid: pid) }
+            }
             AX.setFrame(el, p.frame)
+            // Alcune app applicano la posizione in ritardo o la ignorano la prima volta: si ricontrolla.
+            if let f = AX.frame(el), !Capture.near(f, p.frame, tol: 4) {
+                await sleep(0.25)
+                AX.setFrame(el, p.frame)
+            }
             if let id = AX.windowID(el) { used.insert(id) }
             note("OK \(p.window.appName) «\(p.window.title ?? "")» > desktop \(p.ordinal) \(Int(p.frame.minX)),\(Int(p.frame.minY)) \(Int(p.frame.width))x\(Int(p.frame.height))")
         }
+    }
+
+    /// Avvia insieme le app chiuse di questo desktop (con il loro documento, se c'è) e aspetta
+    /// che abbiano finito di aprirsi e che le loro finestre smettano di comparire. Solo dopo si
+    /// sistemano le finestre una per una e si passa al desktop successivo: così nessuna finestra
+    /// nasce in ritardo sul desktop sbagliato.
+    private func launchTogether(_ items: [Mapping.Placement]) async {
+        var started: [String] = []
+        for p in items {
+            let w = p.window, bid = w.bundleID
+            guard !abortRequested, !started.contains(bid), pids(bid).isEmpty, let app = appURL(w) else { continue }
+            guard await ensureDesktop(p.displayUUID, p.ordinal) else { return }
+            started.append(bid)
+            let tabs = Restorer.safeURLs(w.content.urls ?? []).compactMap(URL.init(string:))
+            if let doc = w.content.documentPath, FileManager.default.fileExists(atPath: doc) {
+                NSWorkspace.shared.open([URL(fileURLWithPath: doc)], withApplicationAt: app,
+                                        configuration: openConfig()) { _, _ in }
+            } else if bid == BrowserAX.firefox, !tabs.isEmpty {
+                // Firefox avviato con le sue schede: niente finestra vuota da sistemare dopo.
+                NSWorkspace.shared.open(tabs, withApplicationAt: app, configuration: openConfig()) { _, _ in }
+            } else {
+                NSWorkspace.shared.openApplication(at: app, configuration: openConfig()) { _, _ in }
+            }
+        }
+        guard !started.isEmpty else { return }
+        status = "Opening \(started.count) apps…"
+        note("Launching together: \(started.joined(separator: ", "))")
+        await waitAllSettled(started, timeout: 10)
+    }
+
+    /// Aspetta che queste app abbiano finito di avviarsi e che il numero delle loro finestre
+    /// resti fermo per un momento (più a lungo se non ne hanno ancora nessuna).
+    private func waitAllSettled(_ bundleIDs: [String], timeout: Double) async {
+        let watcher = AXWatcher()
+        defer { watcher.stop() }
+        let deadline = Date().addingTimeInterval(timeout)
+        var last: [String: Int] = [:], since: [String: Date] = [:]
+        while Date() < deadline {
+            var done = true
+            for b in bundleIDs {
+                let running = NSRunningApplication.runningApplications(withBundleIdentifier: b).filter { !$0.isTerminated }
+                watcher.watch(running.map(\.processIdentifier))
+                let n = windowIDs(b).count
+                if last[b] != n { last[b] = n; since[b] = Date() }
+                let still = Date().timeIntervalSince(since[b] ?? Date())
+                let launched = !running.isEmpty && running.allSatisfy(\.isFinishedLaunching)
+                if !(launched && still >= (n > 0 ? 0.5 : 1.5)) { done = false }
+            }
+            if done { return }
+            await watcher.wait(upTo: 0.2)
+        }
+        note("Some apps were still opening after \(Int(timeout)) s")
     }
 
     /// App da aprire. Una scena può arrivare da un file importato, quindi non ci si fida del
@@ -443,8 +599,8 @@ final class Restorer: ObservableObject {
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: w.bundleID)
     }
 
-    /// Solo indirizzi web o file locali. Esclude schemi come javascript: e, per Firefox,
-    /// argomenti che inizierebbero con «-» e verrebbero letti come opzioni.
+    /// Solo indirizzi web o file locali. Esclude schemi come javascript: e, per prudenza,
+    /// testi che inizierebbero con «-» e potrebbero essere letti come opzioni.
     nonisolated static func safeURLs(_ urls: [String]) -> [String] {
         urls.filter { s in
             guard !s.hasPrefix("-"), let u = URL(string: s), let scheme = u.scheme?.lowercased() else { return false }
@@ -487,12 +643,12 @@ final class Restorer: ObservableObject {
             for attempt in 0..<2 {
                 // Il documento è aperto altrove (prima del ripristino, per un cambio di desktop durante
                 // l'apertura, o nell'unica finestra di un'app a finestra singola): chiudilo là.
-                var elsewhere = Set(pids(bid).flatMap { pid in
-                    AX.allWindows(pid: pid).compactMap { el -> CGWindowID? in
+                let appPids = pids(bid)
+                let everywhere = await offMain { appPids.flatMap { AX.allWindows(pid: $0) } }
+                var elsewhere = Set(everywhere.compactMap { el -> CGWindowID? in
                         guard AX.shows(el, document: doc), let id = AX.windowID(el), !used.contains(id),
                               !allowed.contains(CGS.spaces(forWindow: id).first ?? 0) else { return nil }
                         return id
-                    }
                 })
                 elsewhere.formUnion(strays)
                 if !elsewhere.isEmpty {
@@ -514,9 +670,11 @@ final class Restorer: ObservableObject {
                 let created = pids(bid).flatMap { cgWindows(pid: $0) }.filter { !before.contains($0.0) }
                 strays = Set(created.filter { !nowAllowed.contains($0.1) }.map(\.0))
                 // Nessuna finestra nuova e il file non è visibile da nessuna parte: l'app l'ha ignorato.
-                appIgnoredFile = created.isEmpty && !pids(bid).contains { pid in
+                let nowPids = pids(bid)
+                let showsDoc = await offMain { nowPids.contains { pid in
                     AX.allWindows(pid: pid).contains { AX.shows($0, document: doc) }
-                }
+                } }
+                appIgnoredFile = created.isEmpty && !showsDoc
             }
             return nil
         }
@@ -537,26 +695,105 @@ final class Restorer: ObservableObject {
            [Scripting.safari, Scripting.chrome, BrowserAX.firefox].contains(bid), let app = appURL(w) {
             if let t = w.title, let m = candidates(bid, allowed: allowed).first(where: { AX.title($0) == t }) { return m }
             if pids(bid).isEmpty {
-                _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: openConfig())
-                await sleep(1.5)
+                if bid == BrowserAX.firefox {
+                    // Firefox avviato con gli indirizzi: apre una finestra con quelle schede.
+                    _ = try? await NSWorkspace.shared.open(urls.compactMap(URL.init(string:)),
+                                                           withApplicationAt: app, configuration: openConfig())
+                } else {
+                    _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: openConfig())
+                }
+                // Il browser può riaprire da solo le finestre della sessione precedente:
+                // si aspetta che abbia finito prima di decidere se aprire le schede.
+                await waitWindowsSettled(bid, timeout: 6)
+            }
+            if bid == BrowserAX.firefox, let pid = pids(bid).first {
+                for el in candidates(bid, allowed: allowed) { await firefoxReady(el, pid: pid) }
+            }
+            if let (m, scriptID) = alreadyOpen(bid, urls: urls, incognito: c.privateWindow == true, allowed: allowed) {
+                note("\(w.appName) already shows these tabs: using that window")
+                if bid == BrowserAX.firefox, let a = c.activeTab { BrowserAX.selectTab(m, index: a) }
+                if let scriptID { await fillBrowserWindow(bid, window: scriptID, urls: urls, activeTab: c.activeTab) }
+                return m
             }
             let before = windowIDs(bid)
             switch bid {
-            case Scripting.safari:
-                Scripting.openSafariWindow(urls: urls, activeTab: c.activeTab)
-            case Scripting.chrome:
-                Scripting.openChromeWindow(urls: urls, activeTab: c.activeTab, incognito: c.privateWindow == true)
-            default:
-                // Firefox: prima scheda in una finestra nuova, poi le altre come schede di quella finestra.
-                // safeURLs esclude gli indirizzi che inizierebbero con «-» (opzioni di Firefox).
-                BrowserAX.runFirefox(app: app, ["--new-window", urls[0]])
-                guard let n = await waitNewWindow(bid, excluding: before, allowed: allowed, target: target) else { break }
-                for u in urls.dropFirst() {
-                    BrowserAX.runFirefox(app: app, ["--new-tab", u])
-                    await sleep(0.35)
+            case Scripting.safari, Scripting.chrome:
+                // Finestra nuova, poi si guarda cosa contiene (Chrome senza finestre può rimetterci
+                // da solo l'ultima finestra chiusa) e si fa solo quello che manca.
+                let wantsIncognito = bid == Scripting.chrome && c.privateWindow == true
+                // Se qui c'è già una finestra con solo schede vuote (quella che il browser apre
+                // all'avvio) si usa quella: niente seconda finestra.
+                let script = bid == Scripting.safari ? Scripting.safariWindows() : Scripting.chromeWindows()
+                var reused: (el: AXUIElement, id: Int)?
+                for el in candidates(bid, allowed: allowed) {
+                    guard let f = AX.frame(el), let sw = script.first(where: {
+                        Capture.near($0.bounds, f, tol: 12) && $0.incognito == wantsIncognito
+                            && $0.urls.allSatisfy(Scripting.isBlank)
+                    }), let id = sw.id else { continue }
+                    reused = (el, id); break
                 }
-                await sleep(0.4)
-                if let a = c.activeTab { BrowserAX.selectTab(n, index: a) }
+                if let reused {
+                    note("\(w.appName): using its empty window")
+                    await fillBrowserWindow(bid, window: reused.id, urls: urls, activeTab: c.activeTab)
+                    return reused.el
+                }
+                guard let id = Scripting.newBrowserWindow(bid, incognito: wantsIncognito) else {
+                    note("\(w.appName): could not open a window"); break
+                }
+                await fillBrowserWindow(bid, window: id, urls: urls, activeTab: c.activeTab)
+            default:
+                // Firefox. Non si avvia mai un secondo processo di Firefox (mostrerebbe un errore).
+                guard let pid = pids(bid).first else { break }
+                let list = urls.compactMap(URL.init(string:))
+                let appPids = pids(bid)
+                let hasWindows = await offMain { appPids.contains { !AX.allWindows(pid: $0).isEmpty } }
+                if !hasWindows {
+                    // Nessuna finestra aperta: Firefox apre gli indirizzi in una finestra nuova, qui.
+                    _ = try? await NSWorkspace.shared.open(list, withApplicationAt: app, configuration: openConfig())
+                    guard let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: 8, target: target) else {
+                        note("Firefox: no window after opening the tabs"); break
+                    }
+                    await firefoxReady(n, pid: pid)
+                    if let a = c.activeTab { BrowserAX.selectTab(n, index: a) }
+                    note("Firefox: opened \(list.count) tabs in a new window")
+                    return n
+                }
+                // Firefox ha finestre su altri desktop: gli indirizzi finirebbero lì. Si crea prima
+                // una finestra qui dal menu (⌘N), poi gli indirizzi diventano sue schede.
+                // Appena avviato, Firefox apre già una finestra vuota: si usa quella.
+                let n: AXUIElement
+                if let empty = candidates(bid, allowed: allowed).first(where: { BrowserAX.currentURL($0) == nil }) {
+                    n = empty
+                } else {
+                    guard let newWindow = BrowserAX.menuItem(pid: pid, cmdChar: "N") else {
+                        note("Firefox: New Window menu item not found"); break
+                    }
+                    BrowserAX.press(newWindow)
+                    guard let w = await waitNewWindow(bid, excluding: before, allowed: allowed, target: target) else { break }
+                    n = w
+                }
+                await firefoxReady(n, pid: pid)
+                // Schede presenti appena creata la finestra: quella vuota (selezionata) ed eventuali
+                // elementi fissi della barra (Firefox mostra come scheda anche «Personalizza barra laterale»).
+                let initial = BrowserAX.tabButtons(n)
+                let blank = initial.first { (AX.attr($0, kAXValueAttribute) as? NSNumber)?.boolValue == true }
+                func added() -> [AXUIElement] {
+                    BrowserAX.tabButtons(n).filter { t in !initial.contains(where: { CFEqual($0, t) }) }
+                }
+                _ = try? await NSWorkspace.shared.open(list, withApplicationAt: app, configuration: openConfig())
+                // Le schede arrivano una alla volta: si aspetta che ci siano tutte (max 6 s).
+                let deadline = Date().addingTimeInterval(6)
+                while Date() < deadline && added().count < list.count { await sleep(0.15) }
+                let tabs = added()
+                // La scheda vuota della finestra nuova: se è ancora vuota, si chiude.
+                if let blank, !tabs.isEmpty {
+                    BrowserAX.press(blank)
+                    await sleep(0.15)
+                    if BrowserAX.currentURL(n) == nil, BrowserAX.closeTab(blank) { await sleep(0.2) }
+                }
+                let active = min(max(c.activeTab ?? 1, 1), max(tabs.count, 1))
+                if active <= tabs.count { BrowserAX.press(tabs[active - 1]) }
+                note("Firefox: opened \(tabs.count) of \(list.count) tabs")
                 return n
             }
             if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, target: target) { return n }
@@ -584,12 +821,97 @@ final class Restorer: ObservableObject {
         return await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: 3, target: target)
     }
 
+    /// Aspetta che il numero di finestre dell'app smetta di cambiare (o il tempo massimo).
+    private func waitWindowsSettled(_ bundleID: String, timeout: Double) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        var last = -1, stableSince = Date()
+        await sleep(0.5)
+        while Date() < deadline {
+            let n = windowIDs(bundleID).count
+            if n != last { last = n; stableSince = Date() }
+            else if n > 0 && Date().timeIntervalSince(stableSince) >= 0.6 { return }
+            await sleep(0.2)
+        }
+    }
+
+    /// Una finestra del browser su questo desktop che mostra già almeno metà delle schede
+    /// della scena (per esempio perché il browser ha ripristinato la sessione all'avvio).
+    private func alreadyOpen(_ bid: String, urls: [String], incognito: Bool,
+                             allowed: Set<CGSSpaceID>) -> (AXUIElement, Int?)? {
+        let want = Set(urls.map(Restorer.normalizedURL))
+        let need = max(1, (want.count + 1) / 2)
+        let cands = candidates(bid, allowed: allowed)
+        guard !cands.isEmpty else { return nil }
+        if bid == BrowserAX.firefox {
+            // Senza scorrere le schede (sarebbe visibile): scheda attiva e numero di schede.
+            return cands.first { el in
+                guard let u = BrowserAX.currentURL(el), want.contains(Restorer.normalizedURL(u)) else { return false }
+                return max(BrowserAX.tabButtons(el).count, 1) >= need
+            }.map { ($0, nil) }
+        }
+        let script = bid == Scripting.safari ? Scripting.safariWindows() : Scripting.chromeWindows()
+        for el in cands {
+            guard let f = AX.frame(el),
+                  let sw = script.first(where: { Capture.near($0.bounds, f, tol: 12) }),
+                  sw.incognito == incognito,
+                  Set(sw.urls.map(Restorer.normalizedURL)).intersection(want).count >= need else { continue }
+            return (el, sw.id)
+        }
+        return nil
+    }
+
+    /// Sistema una finestra di Safari o Chrome guardando cosa contiene già: aggiunge solo le
+    /// schede della scena che mancano, chiude solo le schede vuote e i doppioni (le altre pagine
+    /// restano) e seleziona la scheda che era attiva.
+    private func fillBrowserWindow(_ bid: String, window id: Int, urls: [String], activeTab: Int?) async {
+        await sleep(0.4)   // Chrome può riempire la finestra nuova un attimo dopo averla creata
+        let before = Scripting.tabURLs(bid, window: id)
+        note("Browser window \(id) has \(before.count) tabs: \(before.map { Scripting.isBlank($0) ? "(empty)" : $0 }.joined(separator: ", "))")
+        let have = Set(before.map(Restorer.normalizedURL))
+        let missing = urls.filter { !have.contains(Restorer.normalizedURL($0)) }
+        Scripting.addTabs(bid, window: id, urls: missing)
+        let now = Scripting.tabURLs(bid, window: id)
+        var seen = Set<String>(), close: [Int] = []
+        for (i, u) in now.enumerated() where Scripting.isBlank(u) || !seen.insert(Restorer.normalizedURL(u)).inserted {
+            close.append(i + 1)
+        }
+        if !close.isEmpty && close.count < now.count { Scripting.closeTabs(bid, window: id, indexes: close) }
+        note("\(bid == Scripting.chrome ? "Chrome" : "Safari"): \(urls.count - missing.count) of \(urls.count) tabs were already there, \(missing.count) added, \(close.count) empty or duplicate closed")
+        if let a = activeTab, a >= 1, a <= urls.count {
+            let target = Restorer.normalizedURL(urls[a - 1])
+            if let i = Scripting.tabURLs(bid, window: id).firstIndex(where: { Restorer.normalizedURL($0) == target }) {
+                Scripting.selectTab(bid, window: id, index: i + 1)
+            }
+        }
+    }
+
+    /// Firefox mostra schede e pagine all'Accessibilità solo dopo che gliel'hanno chiesto:
+    /// lo chiede e aspetta (al massimo 3 s) che le schede della finestra compaiano.
+    private func firefoxReady(_ window: AXUIElement, pid: pid_t) async {
+        guard BrowserAX.tabButtons(window).isEmpty else { return }
+        BrowserAX.enableAccessibility(pid: pid)
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline && BrowserAX.tabButtons(window).isEmpty { await sleep(0.15) }
+    }
+
+    /// Indirizzo confrontabile: senza frammento e senza «/» finale.
+    nonisolated static func normalizedURL(_ s: String) -> String {
+        var t = s
+        if let i = t.firstIndex(of: "#") { t = String(t[..<i]) }
+        while t.hasSuffix("/") { t.removeLast() }
+        return t.lowercased()
+    }
+
     private func waitNewWindow(_ bundleID: String, excluding before: Set<CGWindowID>, allowed: Set<CGSSpaceID>,
                                timeout: Double = 6, target: (uuid: String, ordinal: Int)? = nil,
                                match: ((AXUIElement) -> Bool)? = nil) async -> AXUIElement? {
         let deadline = Date().addingTimeInterval(timeout)
+        // Si sveglia appena l'app crea una finestra; altrimenti ricontrolla ogni 0,2 s come prima.
+        let watcher = AXWatcher()
+        defer { watcher.stop() }
         while Date() < deadline {
-            await sleep(0.2)
+            watcher.watch(pids(bundleID))
+            await watcher.wait(upTo: 0.2)
             if let target, Topology.display(uuid: target.uuid)?.currentOrdinal != target.ordinal {
                 _ = await ensureDesktop(target.uuid, target.ordinal)
             }

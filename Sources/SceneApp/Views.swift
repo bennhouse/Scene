@@ -6,6 +6,7 @@ enum Layout {
     static let footerHeight: CGFloat = 37
     /// Check + menu più lungo + testo + margini della barra in basso, con un po' di respiro.
     static let detailMinWidth: CGFloat = 470
+    static let detailTop: CGFloat = 15.5
 }
 
 struct ContentView: View {
@@ -20,6 +21,9 @@ struct ContentView: View {
     @FocusState private var sidebarFocused: Bool
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var trusted = AX.isTrusted
+    // Al primo avvio. Non nei test da riga di comando, salvo SCENE_SHOW_WELCOME (per fotografarla).
+    @State private var showWelcome = !UserDefaults.standard.bool(forKey: Permissions.welcomeKey)
+        && (CLI.args.count <= 1 || ProcessInfo.processInfo.environment["SCENE_SHOW_WELCOME"] != nil)
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     struct NameSheet: Identifiable {
@@ -53,6 +57,7 @@ struct ContentView: View {
                                 .contextMenu {
                                     Button("Restore") { restore(s) }
                                     Button("Rename") { selection = s.id; editingTitle = true }
+                                    Button("Duplicate") { duplicate(s) }
                                     Button("Update with Current Windows…") { confirmOverwrite = s }
                                     Button("Export…") { SceneFiles.export(store, only: [s.id], suggested: s.name) }
                                     Divider()
@@ -88,8 +93,8 @@ struct ContentView: View {
                             .font(.caption).tone(.tertiary)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
-                            .frame(width: 170)
                     }
+                    .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.bottom, Layout.footerHeight)
                         .allowsHitTesting(false)
@@ -106,6 +111,13 @@ struct ContentView: View {
             }
             // Barra in basso solo sotto la colonna di destra: la barra laterale arriva fino in fondo.
             .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+            // Avvisi solo sopra il corpo della scena, non sulla barra laterale.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    if !trusted { PermissionBanner() }
+                    if !CGS.supported { UnsupportedBanner() }
+                }
+            }
             // Larghezza minima della colonna: la barra in basso resta sempre su una riga.
             .navigationSplitViewColumnWidth(min: Layout.detailMinWidth, ideal: 600)
             .navigationTitle("Scene")
@@ -124,6 +136,12 @@ struct ContentView: View {
                 .keyboardShortcut("n")
                 .disabled(restorer.isRunning || !CGS.supported)
                 .help("New scene from the open windows (⌘N)")
+                Button { duplicate(selected) } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square").toolbarIcon()
+                }
+                .keyboardShortcut("d")
+                .disabled(selected == nil || restorer.isRunning)
+                .help("Duplicate the selected scene (⌘D)")
                 Button { confirmOverwrite = selected } label: {
                     Label("Update", systemImage: "arrow.clockwise").toolbarIcon()
                 }
@@ -134,12 +152,14 @@ struct ContentView: View {
                         if let s = selected { SceneFiles.export(store, only: [s.id], suggested: s.name) }
                     }
                     .disabled(selected == nil)
-                    Button("Export All Scenes…") { SceneFiles.export(store, only: nil, suggested: "Scene") }
+                    Button("Export All Scenes…") { SceneFiles.export(store, only: nil, suggested: "Scene backup") }
                         .disabled(store.scenes.isEmpty)
                     Divider()
                     Button("Import Scenes…") { SceneFiles.importScenes(store, restorer: restorer) }
                 } label: {
+                    // Il simbolo ha la freccia sopra la scatola e sembra più basso degli altri.
                     Label("Export and Import", systemImage: "square.and.arrow.up").toolbarIcon()
+                        .offset(y: -2.5)
                 }
                 .menuIndicator(.hidden)
                 .help("Export or import scenes")
@@ -157,14 +177,8 @@ struct ContentView: View {
         // Testi senza uno stile proprio: stesso grigio delle altre scritte a finestra non attiva.
         .tone(.primary)
         .onChange(of: selection) { _, _ in editingTitle = false }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            VStack(spacing: 0) {
-                if !trusted { PermissionBanner() }
-                if !CGS.supported { UnsupportedBanner() }
-            }
-        }
         .sheet(item: $naming) { sheet in
-            NamePrompt(title: sheet.renaming == nil ? "New Scene" : "Rename Scene",
+            NamePrompt(title: sheet.renaming == nil ? "Capture current scene" : "Rename Scene",
                        action: sheet.renaming == nil ? "Save" : "Rename",
                        name: sheet.name) { name in
                 if let id = sheet.renaming { store.rename(id, to: name) }
@@ -196,6 +210,8 @@ struct ContentView: View {
             Text("The saved scene will be replaced with the apps and windows open now. This can't be undone.")
         }
         .onReceive(timer) { _ in trusted = AX.isTrusted }
+        .sheet(isPresented: $showWelcome) { WelcomeView { showWelcome = false } }
+        .onReceive(NotificationCenter.default.publisher(for: .showWelcome)) { _ in showWelcome = true }
         .onAppear {
             if selection == nil { selection = store.scenes.first?.id }
             if !store.canSave {
@@ -205,6 +221,11 @@ struct ContentView: View {
     }
 
     private var selected: SavedScene? { store.scenes.first { $0.id == selection } }
+
+    private func duplicate(_ s: SavedScene?) {
+        guard let s, let copy = store.duplicate(s.id) else { return }
+        selection = copy.id
+    }
 
     private func moveSelection(_ step: Int) {
         guard !store.scenes.isEmpty else { return }
@@ -252,8 +273,9 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .frame(height: Layout.footerHeight - 1)
         }
-        // Nessuno sfondo proprio: si vede quello della colonna di destra
-        // («Nessuna scena selezionata»), quindi il colore è identico.
+        // Sfondo pieno dello stesso colore della colonna di destra: identico a vedersi, ma
+        // l'elenco delle finestre che scorre sotto non traspare.
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func restore(_ s: SavedScene) {
@@ -412,7 +434,11 @@ struct SceneDetail: View {
                     .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.5)))
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 20)
+            // Più in alto: la bolla della configurazione sta alla stessa altezza della prima
+            // riga della barra laterale.
+            .padding(.top, Layout.detailTop)
+            .padding(.bottom, 20)
         }
     }
 }
@@ -455,14 +481,17 @@ struct WindowRow: View {
 /// macOS ha cambiato le funzioni private con cui Scene legge i desktop.
 struct UnsupportedBanner: View {
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill").tone(.yellow)
             Text("Scene can't read desktops on this version of macOS. Saving and restoring are turned off. Your saved scenes are kept.")
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
+                .multilineTextAlignment(.center)
+                // Niente fixedSize verticale: nel calcolo della misura minima SwiftUI prova una
+                // larghezza quasi nulla, il testo andrebbe a capo a ogni parola e allungherebbe la finestra.
+                .lineLimit(3)
         }
         .font(.callout)
         .padding(10)
+        .frame(maxWidth: .infinity)
         .background(Color.yellow.opacity(0.15))
         .onAppear { Log.write("PRIVATE API unavailable: missing \(CGS.missing)") }
     }
@@ -470,17 +499,18 @@ struct UnsupportedBanner: View {
 
 struct PermissionBanner: View {
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill").tone(.yellow)
             Text("Scene needs Accessibility access to move windows and switch desktops.")
-            Spacer()
-            Button("Open Settings") {
-                AX.requestTrust()
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-            }
+                .multilineTextAlignment(.center)
+                // Niente fixedSize verticale: nel calcolo della misura minima SwiftUI prova una
+                // larghezza quasi nulla, il testo andrebbe a capo a ogni parola e allungherebbe la finestra.
+                .lineLimit(3)
+            Button("Open Settings") { Permissions.openAccessibilitySettings() }
         }
         .font(.callout)
         .padding(10)
+        .frame(maxWidth: .infinity)
         .background(Color.yellow.opacity(0.15))
     }
 }
@@ -499,16 +529,19 @@ struct NamePrompt: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title).font(.headline)
-            TextField("Name", text: $name).textFieldStyle(.roundedBorder).frame(width: 300)
+            TextField("Name", text: $name).textFieldStyle(.roundedBorder)
                 .onSubmit(commit)
+            // Pulsanti allineati al bordo destro del campo: il foglio è largo quanto il contenuto.
             HStack {
-                Spacer()
+                Spacer(minLength: 0)
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(action, action: commit).keyboardShortcut(.defaultAction)
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
+        .frame(width: 250)
         .padding(20)
+        .fixedSize()
     }
 
     private func commit() {
@@ -752,16 +785,65 @@ struct ClickArea: NSViewRepresentable {
 
 /// Spazio flessibile tra nome della scena e pulsanti: li spinge a destra, come farebbe il
 /// titolo nativo (che qui è nascosto per mostrare icona e nome modificabili).
+/// Accesso alla finestra AppKit: sempre in primo piano, dimensione al primo avvio e
+/// spazio flessibile nella barra degli strumenti (pulsanti sempre a destra).
 struct ToolbarSpacer: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { NSView() }
-    func updateNSView(_ v: NSView, context: Context) {
-        // SwiftUI può ricostruire la barra: si ricontrolla a ogni aggiornamento.
-        for delay in [0.0, 0.3, 1.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard let tb = v.window?.toolbar, tb.items.count > 1,
-                      !tb.items.contains(where: { $0.itemIdentifier == .flexibleSpace }) else { return }
-                tb.insertItem(withItemIdentifier: .flexibleSpace, at: 1)
+    func makeNSView(context: Context) -> NSView { WindowHelperView() }
+    func updateNSView(_ v: NSView, context: Context) {}
+}
+
+final class WindowHelperView: NSView {
+    private var observer: NSObjectProtocol?
+    private var removal: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for o in [observer, removal].compactMap({ $0 }) { NotificationCenter.default.removeObserver(o) }
+        observer = nil; removal = nil
+        guard let w = window else { return }
+        // «Sempre in primo piano» solo quando Scene non è l'app attiva. Quando è attiva la sua
+        // finestra è già davanti a tutto e resta normale: così si trascina tra i desktop come le
+        // altre (macOS decide come trattarla all'inizio del trascinamento, in base al livello).
+        WindowLevel.attach(w)
+        if Shared.firstLaunch {
+            Shared.firstLaunch = false
+            let visible = (w.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+            let size = NSSize(width: min(760, visible.width - 40), height: min(480, visible.height - 40))
+            w.setContentSize(size)
+            w.center()
+        }
+        // SwiftUI ricostruisce la barra quando cambia il contenuto (per esempio dopo una nuova
+        // scena) e lo spazio flessibile sparisce: si rimette a ogni aggiornamento della finestra.
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.didUpdateNotification, object: w, queue: .main) { [weak w] _ in
+            MainActor.assumeIsolated { WindowHelperView.ensureSpacer(w?.toolbar) }
+        }
+        DispatchQueue.main.async { [weak w] in WindowHelperView.ensureSpacer(w?.toolbar) }
+        // SwiftUI toglie lo spazio flessibile quando riallinea la barra (per esempio dopo aver
+        // cancellato una scena): si rimette subito, prima che la barra venga ridisegnata.
+        if let tb = w.toolbar {
+            removal = NotificationCenter.default.addObserver(
+                forName: NSToolbar.didRemoveItemNotification, object: tb, queue: nil) { [weak tb] n in
+                guard (n.userInfo?["item"] as? NSToolbarItem)?.itemIdentifier == .flexibleSpace else { return }
+                // Al momento dell'avviso l'elemento risulta ancora nella barra: si rimette appena
+                // esce. La chiusura del dialogo gira in una modalità del run loop in cui le code
+                // normali aspettano, quindi si usa anche la modalità corrente.
+                let mode = RunLoop.current.currentMode ?? .default
+                RunLoop.main.perform(inModes: [mode, .common, .eventTracking, .modalPanel]) {
+                    MainActor.assumeIsolated { WindowHelperView.ensureSpacer(tb) }
+                }
             }
         }
+    }
+
+    @MainActor
+    static func ensureSpacer(_ tb: NSToolbar?) {
+        guard let tb, tb.items.count > 1,
+              !tb.items.contains(where: { $0.itemIdentifier == .flexibleSpace }) else { return }
+        tb.insertItem(withItemIdentifier: .flexibleSpace, at: 1)
+    }
+
+    deinit {
+        for o in [observer, removal].compactMap({ $0 }) { NotificationCenter.default.removeObserver(o) }
     }
 }

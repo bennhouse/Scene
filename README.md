@@ -16,7 +16,11 @@ Scene saves the windows you have open on your Mac, including which display and w
 
 macOS has no public way to move a window to another desktop, so Scene doesn't try. It visits each desktop instead, by pressing your Mission Control shortcuts for "Move left a space" and "Move right a space". On each desktop it opens the windows that are missing and moves and resizes the rest. Then it goes back to the desktop you started from.
 
-While it switches desktops, the keyboard is blocked so you can't switch desktops by accident. Trackpad swipes are blocked too. The block lasts 8 seconds at most.
+A desktop whose windows are already where they should be is not visited. The apps of a desktop are opened together, and Scene waits until all of them have finished opening before it moves on, so no window ends up on the wrong desktop. If a browser reopens its own windows at launch, Scene uses them instead of opening the tabs again.
+
+While Scene captures or restores, a thin outline in the colours of the scene's apps pulses around each screen, and a small panel at the top shows what it is doing.
+
+While it switches desktops, the keyboard is blocked so you can't switch desktops by accident. Trackpad swipes are blocked too. The block lasts 25 seconds at most and always ends when the restore ends or Scene quits.
 
 Before restoring, Scene can close windows on every desktop. You can choose which:
 
@@ -36,12 +40,24 @@ A scene saved with an external monitor can be restored on the Mac alone, and the
 
 ## Install
 
-1. Download `Scene-1.0.1.dmg` from [Releases](../../releases) and drag Scene to Applications.
+1. Download `Scene-1.0.2.dmg` from [Releases](../../releases) and drag Scene to Applications.
 2. Scene is not notarized, so macOS blocks it the first time. Open System Settings › Privacy & Security, scroll down and click **Open Anyway**. You can also clear the quarantine flag from Terminal:
    ```
    xattr -dr com.apple.quarantine /Applications/Scene.app
    ```
-3. Give Scene Accessibility access when it asks (System Settings › Privacy & Security › Accessibility). macOS will also ask before Scene reads Finder, Safari or Chrome.
+3. On first launch Scene lists the permissions it needs and can ask for all of them at once: Accessibility (required), control of Finder, Safari and Chrome, and access to Desktop, Documents and Downloads. You can open the list again from Scene › Permissions….
+
+## Uninstall
+
+Quit Scene, then run:
+
+```
+rm -rf /Applications/Scene.app ~/Library/Application\ Support/Scene ~/Library/Logs/Scene
+defaults delete local.scenerecall.Scene
+tccutil reset All local.scenerecall.Scene
+```
+
+The last line removes Scene from the Accessibility, Automation and Files lists in System Settings.
 
 ## Build from source
 
@@ -60,8 +76,7 @@ You need the Xcode Command Line Tools (Swift 6).
 - Scene has been tested on one Mac: Sequoia on Apple Silicon, with an external monitor that has two desktops. The Intel build has only been checked under Rosetta.
 - Not tested yet:
   - restoring on a Mac with no external monitor
-  - Safari and Chrome tabs, including Chrome incognito windows (Firefox tabs are tested)
-  - the "all windows" close option
+  - Safari tabs and Chrome incognito windows (Chrome and Firefox tabs are tested)
   - the default macOS shortcuts ⌃← and ⌃→ (the test Mac used custom ones)
   - blocking trackpad swipes
 - Code comments are in Italian.

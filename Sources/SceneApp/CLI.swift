@@ -9,7 +9,7 @@ import Cocoa
 ///   --restore <nome>          ripristina la scena (--close-first [--close-mode all|scene])
 ///   --switch <uuid> <n>       porta il monitor al desktop n e torna indietro
 ///   --dry-not-included <nome> elenca cosa terrebbe/chiuderebbe «le finestre non incluse»
-///   --block-cap <s>           tetto del blocco tastiera (default 8 s)
+///   --block-cap <s>           tetto del blocco tastiera (default 25 s)
 ///   --setups                  scrive nel log la configurazione di monitor di ogni scena
 ///   --snapshot <cartella>     salva l'immagine della finestra attiva e non attiva (--dark: modalità scura)
 ///   --quit                    termina al termine delle azioni
@@ -56,8 +56,8 @@ enum CLI {
                 Log.write("SETUP «\(sc.name)» \(sc.config.label) setup #\(store.setupIndex(sc)) [\(SceneStore.setupKey(sc))]")
             }
         }
-        // Solo per abbassare il tetto del blocco tastiera (test), mai per alzarlo oltre 8 s.
-        if let c = value("--block-cap").flatMap(Double.init) { InputBlocker.cap = min(max(c, 0), 8) }
+        // Solo per abbassare il tetto del blocco tastiera (test), mai per alzarlo oltre 25 s.
+        if let c = value("--block-cap").flatMap(Double.init) { InputBlocker.cap = min(max(c, 0), 25) }
         if let path = value("--import"), let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
             do { Log.write("IMPORT: \(try store.importData(data)) scenes") }
             catch { Log.write("IMPORT failed: \(error)") }
@@ -100,6 +100,13 @@ private func snapshot(to path: String) {
           let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds) else { return }
     frameView.cacheDisplay(in: frameView.bounds, to: rep)
     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    // Anche il foglio aperto sopra la finestra, se c'è (es. la schermata dei permessi).
+    if let sheet = w.attachedSheet, let v = sheet.contentView?.superview,
+       let r = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+        v.cacheDisplay(in: v.bounds, to: r)
+        try? r.representation(using: .png, properties: [:])?
+            .write(to: URL(fileURLWithPath: path.replacingOccurrences(of: ".png", with: "-sheet.png")))
+    }
 }
 
 /// Test della mappatura tra configurazioni (topologia simulata: non serve staccare il monitor).

@@ -8,12 +8,20 @@ enum Capture {
     @MainActor
     static func full(name: String, restorer: Restorer) async -> SavedScene {
         restorer.status = "Reading windows…"
-        defer { restorer.status = "" }
-        if AX.isTrusted && !AX.waitResponsive() {
+        ProgressOverlay.shared.show(title: "Capturing «\(name)»", status: restorer.$status,
+                                   appPaths: NSWorkspace.shared.runningApplications
+                                       .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+                                       .compactMap { $0.bundleURL?.path })
+        defer { restorer.status = ""; ProgressOverlay.shared.hide() }
+        if AX.isTrusted, !(await offMain { AX.waitResponsive() }) {
             Log.write("Capture: Accessibility not responding, titles and documents not read")
         }
-        var wids: [UUID: CGWindowID] = [:]
-        var scene = current(name: name, windowIDs: &wids)
+        // Lettura delle finestre fuori dal thread principale: l'interfaccia resta reattiva.
+        var (scene, wids) = await offMain { () -> (SavedScene, [UUID: CGWindowID]) in
+            var ids: [UUID: CGWindowID] = [:]
+            let s = current(name: name, windowIDs: &ids)
+            return (s, ids)
+        }
         guard AX.isTrusted, !restorer.isRunning else { return scene }
         let start = Dictionary(uniqueKeysWithValues: scene.displays.map { ($0.uuid, $0.currentOrdinal) })
         let pending = scene.windows.filter { $0.desktopOrdinal != start[$0.displayUUID] && $0.title == nil }
@@ -88,6 +96,7 @@ enum Capture {
 
         var windows: [SavedWindow] = []
         var remoteDone = Set<pid_t>()
+        var usedScript = Set<String>()
         var z = 0
         for w in info {
             guard (w[kCGWindowLayer as String] as? Int) == 0,
@@ -119,7 +128,18 @@ enum Capture {
             } else if let m = axFramesByPID[pid]?.first(where: { near($0.0, bounds) }) {
                 title = m.1; content.documentPath = m.2
             }
-            if let sw = scripted[bundleID]?.first(where: { near($0.bounds, bounds) }) {
+            // Finestra AppleScript corrispondente: stessa posizione e, se più finestre sono una
+            // sopra l'altra, quella col titolo giusto. Ognuna si usa una volta sola, altrimenti due
+            // finestre sovrapposte risulterebbero la stessa (e al ripristino diventerebbero due copie).
+            let overlapping = (scripted[bundleID] ?? []).indices.filter {
+                !usedScript.contains("\(bundleID)#\($0)") && Capture.near(scripted[bundleID]![$0].bounds, bounds)
+            }
+            let pick = overlapping.first { i in
+                let st = scripted[bundleID]![i].title
+                return !st.isEmpty && (title?.hasPrefix(st) == true || title == st)
+            } ?? overlapping.first
+            if let i = pick { usedScript.insert("\(bundleID)#\(i)") }
+            if let i = pick, let sw = scripted[bundleID]?[i] {
                 title = title ?? sw.title
                 content.folderPath = sw.folderPath
                 if !sw.urls.isEmpty { content.urls = sw.urls; content.activeTab = sw.activeTab }
@@ -128,7 +148,15 @@ enum Capture {
             // Firefox: schede lette via Accessibilità (anche su altri desktop, se raggiungibili).
             if bundleID == BrowserAX.firefox, AX.isTrusted,
                let el = (AX.windows(pid: pid) + AX.remoteWindows(pid: pid)).first(where: { AX.windowID($0) == wid }),
-               let tabs = BrowserAX.readTabs(el) {
+               let tabs = { () -> (urls: [String], active: Int?)? in
+                   // Firefox appena avviato: le schede compaiono solo dopo averle chieste.
+                   if BrowserAX.tabButtons(el).isEmpty {
+                       BrowserAX.enableAccessibility(pid: pid)
+                       for _ in 0..<10 where BrowserAX.tabButtons(el).isEmpty { usleep(150_000) }
+                   }
+                   defer { BrowserAX.disableEnhancedUI(pid: pid) }
+                   return BrowserAX.readTabs(el)
+               }() {
                 content.urls = tabs.urls
                 content.activeTab = tabs.active
             }
