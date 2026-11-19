@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- Switching scenes no longer makes the toolbar buttons jump next to the scene name for an instant.
+- No scroll bar in the scene's window list, so the column keeps the same width from one scene to the next.
+
 ## 1.1.0
 
 - New option: close **apps not in the scene** before restoring. Scene first checks them for unsaved changes and asks what to do.

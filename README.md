@@ -58,7 +58,7 @@ A scene saved with an external monitor can be restored on the Mac alone, and the
 
 ## Install
 
-1. Download `Scene-1.1.0.dmg` from [Releases](../../releases) and drag Scene to Applications.
+1. Download `Scene-1.1.1.dmg` from [Releases](../../releases) and drag Scene to Applications.
 2. Scene is not notarized, so macOS blocks it the first time. Open System Settings › Privacy & Security, scroll down and click **Open Anyway**. You can also clear the quarantine flag from Terminal:
    ```
    xattr -dr com.apple.quarantine /Applications/Scene.app

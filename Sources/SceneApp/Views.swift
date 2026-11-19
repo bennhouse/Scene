@@ -104,6 +104,7 @@ struct ContentView: View {
             Group {
                 if let s = store.scenes.first(where: { $0.id == selection }) {
                     SceneDetail(scene: s, restore: { restore(s) })
+                        .scrollIndicators(.never)
                 } else {
                     Text("No Scene Selected").tone(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -120,9 +121,11 @@ struct ContentView: View {
             }
             // Larghezza minima della colonna: la barra in basso resta sempre su una riga.
             .navigationSplitViewColumnWidth(min: Layout.detailMinWidth, ideal: 600)
-            .navigationTitle("Scene")
-            .toolbar(removing: .title)
-            .background(ToolbarSpacer())
+            // Titolo vuoto ma presente: nella barra occupa lo spazio libero e tiene i pulsanti a
+            // destra. Toglierlo obbligava a rimettere uno spazio flessibile, che SwiftUI rimuove a
+            // ogni cambio di scena: i pulsanti saltavano per un istante accanto al nome.
+            .navigationTitle("")
+            .background(WindowAccess())
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     TitleEditor(scene: selected, editing: $editingTitle,
@@ -435,6 +438,8 @@ struct SceneDetail: View {
     }
 
     var body: some View {
+        // Senza barra di scorrimento: con «Mostra sempre» la barra toglieva spazio e la colonna
+        // cambiava larghezza da una scena all'altra.
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .firstTextBaseline) {
@@ -811,23 +816,15 @@ struct ClickArea: NSViewRepresentable {
     }
 }
 
-/// Spazio flessibile tra nome della scena e pulsanti: li spinge a destra, come farebbe il
-/// titolo nativo (che qui è nascosto per mostrare icona e nome modificabili).
-/// Accesso alla finestra AppKit: sempre in primo piano, dimensione al primo avvio e
-/// spazio flessibile nella barra degli strumenti (pulsanti sempre a destra).
-struct ToolbarSpacer: NSViewRepresentable {
+/// Accesso alla finestra AppKit: sempre in primo piano e dimensione al primo avvio.
+struct WindowAccess: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { WindowHelperView() }
     func updateNSView(_ v: NSView, context: Context) {}
 }
 
 final class WindowHelperView: NSView {
-    private var observer: NSObjectProtocol?
-    private var removal: NSObjectProtocol?
-
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        for o in [observer, removal].compactMap({ $0 }) { NotificationCenter.default.removeObserver(o) }
-        observer = nil; removal = nil
         guard let w = window else { return }
         // Sempre in primo piano (vedi WindowLevel).
         WindowLevel.attach(w)
@@ -838,39 +835,6 @@ final class WindowHelperView: NSView {
             w.setContentSize(size)
             w.center()
         }
-        // SwiftUI ricostruisce la barra quando cambia il contenuto (per esempio dopo una nuova
-        // scena) e lo spazio flessibile sparisce: si rimette a ogni aggiornamento della finestra.
-        observer = NotificationCenter.default.addObserver(
-            forName: NSWindow.didUpdateNotification, object: w, queue: .main) { [weak w] _ in
-            MainActor.assumeIsolated { WindowHelperView.ensureSpacer(w?.toolbar) }
-        }
-        DispatchQueue.main.async { [weak w] in WindowHelperView.ensureSpacer(w?.toolbar) }
-        // SwiftUI toglie lo spazio flessibile quando riallinea la barra (per esempio dopo aver
-        // cancellato una scena): si rimette subito, prima che la barra venga ridisegnata.
-        if let tb = w.toolbar {
-            removal = NotificationCenter.default.addObserver(
-                forName: NSToolbar.didRemoveItemNotification, object: tb, queue: nil) { [weak tb] n in
-                guard (n.userInfo?["item"] as? NSToolbarItem)?.itemIdentifier == .flexibleSpace else { return }
-                // Al momento dell'avviso l'elemento risulta ancora nella barra: si rimette appena
-                // esce. La chiusura del dialogo gira in una modalità del run loop in cui le code
-                // normali aspettano, quindi si usa anche la modalità corrente.
-                let mode = RunLoop.current.currentMode ?? .default
-                RunLoop.main.perform(inModes: [mode, .common, .eventTracking, .modalPanel]) {
-                    MainActor.assumeIsolated { WindowHelperView.ensureSpacer(tb) }
-                }
-            }
-        }
-    }
-
-    @MainActor
-    static func ensureSpacer(_ tb: NSToolbar?) {
-        guard let tb, tb.items.count > 1,
-              !tb.items.contains(where: { $0.itemIdentifier == .flexibleSpace }) else { return }
-        tb.insertItem(withItemIdentifier: .flexibleSpace, at: 1)
-    }
-
-    deinit {
-        for o in [observer, removal].compactMap({ $0 }) { NotificationCenter.default.removeObserver(o) }
     }
 }
 
