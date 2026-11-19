@@ -18,6 +18,17 @@ macOS has no public way to move a window to another desktop, so Scene doesn't tr
 
 A desktop whose windows are already where they should be is not visited. The apps of a desktop are opened together, and Scene waits until all of them have finished opening before it moves on, so no window ends up on the wrong desktop. If a browser reopens its own windows at launch, Scene uses them instead of opening the tabs again.
 
+Some cases Scene handles on its own:
+
+- **Slow apps.** An app still showing its loading screen (DaVinci Resolve, for example) is waited for, up to 45 seconds, so its window opens on the right desktop.
+- **Apps waiting in the background.** An app whose windows are all on hidden desktops may be paused by macOS and open a document only when it becomes active again. Scene wakes it for a moment instead of starting a second copy of it.
+- **Minimized windows** are saved with their document and restored minimized.
+- **Untitled documents** ("Untitled", "Senza nome"…) are never mistaken for a file with the same name.
+- **Safari private windows** are restored as private windows. If Safari doesn't allow them (Screen Time content restrictions), Scene dismisses Safari's notice and opens a normal window.
+- **Open and Save panels** are never taken for a scene's window.
+
+Press **Esc three times** to stop a restore. The panel at the top counts the presses; Scene goes back to the desktops you started from.
+
 The Scene window stays in front of other apps' windows. It becomes a normal window while you drag it by its title bar (so you can move it to another desktop), while another Scene window is open, and while Scene restores or captures (so it never covers an app asking you to save).
 
 While Scene captures or restores, a thin outline in the colours of the scene's apps pulses around each screen, and a small panel at the top shows what it is doing.
@@ -30,6 +41,8 @@ Before restoring, Scene can close windows on every desktop. You can choose which
 - **apps not in the scene**: apps that have no window in the scene are quit, then the windows not in the scene are closed as above. Finder is never quit, only its windows are closed. Before quitting, Scene checks every window of those apps for unsaved changes (the dot in the close button). If it finds any, or can't read an app's windows, it lists them and asks whether to keep those apps open, quit them anyway (each app then asks whether to save) or stop.
 - **the scene's windows**: windows of the apps in the scene
 - **all windows**
+
+Before closing windows, Scene checks them for unsaved changes (the dot in the close button). If some have them, it asks once whether to keep them open, close them anyway or stop. Windows Scene closes on its own (a document open twice) are never closed when they have unsaved changes.
 
 Windows are closed with their close button, so apps can still ask you to save. If one does, Scene pauses until you answer. Apps that only hide their window when you close it (Claude, Music) count as closed. When a scene needs one of their windows, Scene asks the app to show it again, as a click in the Dock would.
 
