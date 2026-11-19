@@ -24,7 +24,12 @@ enum Capture {
         }
         guard AX.isTrusted, !restorer.isRunning else { return scene }
         let start = Dictionary(uniqueKeysWithValues: scene.displays.map { ($0.uuid, $0.currentOrdinal) })
-        let pending = scene.windows.filter { $0.desktopOrdinal != start[$0.displayUUID] && $0.title == nil }
+        // Da leggere sul loro desktop: le finestre senza titolo e quelle di Firefox di cui non si
+        // sono lette le schede (Firefox le mostra solo per le finestre del desktop visibile).
+        func needsVisit(_ w: SavedWindow) -> Bool {
+            w.title == nil || (w.bundleID == BrowserAX.firefox && (w.content.urls ?? []).isEmpty)
+        }
+        let pending = scene.windows.filter { $0.desktopOrdinal != start[$0.displayUUID] && needsVisit($0) }
         guard !pending.isEmpty else { return scene }
 
         restorer.isRunning = true
@@ -37,13 +42,27 @@ enum Capture {
             let uuid = String(parts[0]), ord = Int(parts[1]) ?? 1
             guard await restorer.switchDesktop(uuid, to: ord) else { continue }
             for (i, w) in scene.windows.enumerated()
-            where w.displayUUID == uuid && w.desktopOrdinal == ord && w.title == nil {
+            where w.displayUUID == uuid && w.desktopOrdinal == ord && needsVisit(w) {
                 guard let wid = wids[w.id],
                       let el = NSRunningApplication.runningApplications(withBundleIdentifier: w.bundleID)
                         .flatMap({ AX.windows(pid: $0.processIdentifier) }).first(where: { AX.windowID($0) == wid })
                 else { continue }
-                let t = AX.title(el)
+                let t = AX.title(el) ?? w.title
                 scene.windows[i].title = t
+                if w.bundleID == BrowserAX.firefox, (w.content.urls ?? []).isEmpty {
+                    var pid: pid_t = 0
+                    AXUIElementGetPid(el, &pid)
+                    if BrowserAX.tabButtons(el).isEmpty {
+                        BrowserAX.enableAccessibility(pid: pid)
+                        for _ in 0..<20 where BrowserAX.tabButtons(el).isEmpty { try? await Task.sleep(nanoseconds: 150_000_000) }
+                    }
+                    if let tabs = BrowserAX.readTabs(el) {
+                        scene.windows[i].content.urls = tabs.urls
+                        scene.windows[i].content.activeTab = tabs.active
+                    }
+                    BrowserAX.disableEnhancedUI(pid: pid)
+                    continue
+                }
                 if scene.windows[i].content.documentPath == nil {
                     if let d = AX.documentPath(el) {
                         scene.windows[i].content.documentPath = d
@@ -152,7 +171,7 @@ enum Capture {
                    // Firefox appena avviato: le schede compaiono solo dopo averle chieste.
                    if BrowserAX.tabButtons(el).isEmpty {
                        BrowserAX.enableAccessibility(pid: pid)
-                       for _ in 0..<10 where BrowserAX.tabButtons(el).isEmpty { usleep(150_000) }
+                       for _ in 0..<20 where BrowserAX.tabButtons(el).isEmpty { usleep(150_000) }
                    }
                    defer { BrowserAX.disableEnhancedUI(pid: pid) }
                    return BrowserAX.readTabs(el)

@@ -23,6 +23,8 @@ final class Restorer: ObservableObject {
     private var preexisting = Set<CGWindowID>()
     /// Finestra usata per ogni documento della scena, per chiudere le copie arrivate in ritardo.
     private var placedDocuments: [(bundleID: String, appName: String, path: String, id: CGWindowID)] = []
+    /// Finestre della scena per cui Firefox è stato avviato direttamente con le loro schede.
+    private var launchedWithTabs = Set<UUID>()
     /// In questo ripristino si è aperta una seconda istanza di un'app per un documento.
     private var triedNewInstance = false
     private var skipWaiting = false
@@ -64,6 +66,7 @@ final class Restorer: ObservableObject {
         ours = []
         placedDocuments = []
         triedNewInstance = false
+        launchedWithTabs = []
         preexisting = Set(((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]]) ?? [])
             .compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
         abortRequested = false; skipWaiting = false
@@ -758,7 +761,12 @@ final class Restorer: ObservableObject {
                                               target: (p.displayUUID, p.ordinal)) else {
                 note("No window for \(p.window.appName) «\(p.window.title ?? "")»"); continue
             }
-            // Mai posizionare una finestra che non sta sul desktop giusto.
+            // Mai posizionare una finestra che non sta sul desktop giusto. Se nel frattempo è
+            // cambiato il desktop (un'app attivata ci ha portato altrove), prima si torna.
+            if let id = AX.windowID(el), let sp = CGS.spaces(forWindow: id).first,
+               !Set(Topology.displays().map(\.currentSpace)).contains(sp) {
+                _ = await ensureDesktop(p.displayUUID, p.ordinal)
+            }
             if let id = AX.windowID(el), let sp = CGS.spaces(forWindow: id).first,
                !Set(Topology.displays().map(\.currentSpace)).contains(sp) {
                 note("\(p.window.appName) window is on another desktop, skipping it"); continue
@@ -805,6 +813,7 @@ final class Restorer: ObservableObject {
             } else if bid == BrowserAX.firefox, !tabs.isEmpty {
                 // Firefox avviato con le sue schede: niente finestra vuota da sistemare dopo.
                 NSWorkspace.shared.open(tabs, withApplicationAt: app, configuration: openConfig()) { _, _ in }
+                launchedWithTabs.insert(w.id)
             } else {
                 NSWorkspace.shared.openApplication(at: app, configuration: openConfig()) { _, _ in }
             }
@@ -915,13 +924,36 @@ final class Restorer: ObservableObject {
                     triedNewInstance = true
                 }
                 let running = !pids(bid).isEmpty
+                // Un'app aperta con tutte le finestre su desktop nascosti può essere «addormentata»
+                // da macOS (App Nap): riceve il file ma non apre la finestra finché non torna attiva.
+                let visible = Set(Topology.displays().map(\.currentSpace))
+                let asleep = running && !pids(bid).flatMap { cgWindows(pid: $0) }.contains { visible.contains($0.1) }
                 let before = windowIDs(bid)
                 _ = try? await NSWorkspace.shared.open([url], withApplicationAt: app,
                                                        configuration: openConfig(newInstance: newInstance))
-                // Un'app già aperta può metterci parecchio ad aprire un file grande (WordCraft con un
-                // .docx): aspettarla abbastanza evita di aprirne una seconda istanza, e una seconda copia.
-                if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: running ? 9 : 10,
+                if let n = await waitNewWindow(bid, excluding: before, allowed: allowed,
+                                               timeout: newInstance ? 10 : (asleep ? 4 : (running ? 9 : 10)),
                                                target: target, match: { AX.shows($0, document: doc) }) { return n }
+                if attempt == 0 && asleep, let first = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+                    .filter({ !$0.isTerminated }).min(by: { ($0.launchDate ?? .distantPast) < ($1.launchDate ?? .distantPast) }) {
+                    // Si sveglia l'app attivandola: apre il file che ha già ricevuto (rimandarglielo ne
+                    // aprirebbe due). macOS passa per un attimo al desktop della sua finestra; si torna
+                    // subito indietro e la finestra nuova è qui. Così non serve una seconda istanza,
+                    // che lascerebbe il file in coda nella prima e una copia in più più tardi.
+                    note("\(w.appName) is waiting in the background: waking it to open «\(url.lastPathComponent)»")
+                    // Da un'app in secondo piano NSRunningApplication.activate() non basta più:
+                    // LaunchServices invece la attiva sempre.
+                    if let url = first.bundleURL {
+                        _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: openConfig(activates: true))
+                    } else {
+                        first.activate()
+                    }
+                    // macOS passa al desktop dell'app un attimo dopo: si aspetta e si torna qui.
+                    await sleep(0.8)
+                    guard await ensureDesktop(target.uuid, target.ordinal) else { return nil }
+                    if let n = await waitNewWindow(bid, excluding: before, allowed: allowed, timeout: 6,
+                                                   target: target, match: { AX.shows($0, document: doc) }) { return n }
+                }
                 let nowAllowed = Set(Topology.displays().map(\.currentSpace))
                 let created = pids(bid).flatMap { cgWindows(pid: $0) }.filter { !before.contains($0.0) }
                 strays = Set(created.filter { !nowAllowed.contains($0.1) }.map(\.0))
@@ -965,6 +997,24 @@ final class Restorer: ObservableObject {
             }
             if bid == BrowserAX.firefox, let pid = pids(bid).first {
                 for el in candidates(bid, allowed: allowed) { await firefoxReady(el, pid: pid) }
+                // Firefox avviato da Scene con queste schede: la finestra nata all'avvio è questa,
+                // anche se la pagina sta ancora caricando (o ha cambiato indirizzo). Riaprire le
+                // schede le duplicherebbe.
+                if launchedWithTabs.contains(w.id) {
+                    let hosts = Set(urls.compactMap { URL(string: $0)?.host?.lowercased() })
+                    let deadline = Date().addingTimeInterval(4)
+                    while Date() < deadline {
+                        let mine = candidates(bid, allowed: allowed).filter { AX.windowID($0).map(ours.contains) ?? false }
+                        if let m = mine.first(where: { el in
+                            BrowserAX.currentURL(el).flatMap { URL(string: $0)?.host?.lowercased() }.map(hosts.contains) ?? false
+                        }) {
+                            note("Firefox: using the window it opened at launch")
+                            if let a = c.activeTab { BrowserAX.selectTab(m, index: a) }
+                            return m
+                        }
+                        await sleep(0.2)
+                    }
+                }
             }
             if let (m, scriptID) = alreadyOpen(bid, urls: urls, incognito: c.privateWindow == true, allowed: allowed) {
                 note("\(w.appName) already shows these tabs: using that window")
