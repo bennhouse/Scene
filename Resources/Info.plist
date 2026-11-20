@@ -2,21 +2,37 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key><string>en</string>
-	<key>CFBundleExecutable</key><string>SceneApp</string>
-	<key>CFBundleIdentifier</key><string>local.scenerecall.Scene</string>
-	<key>CFBundleName</key><string>Scene</string>
-	<key>CFBundleDisplayName</key><string>Scene</string>
-	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>1.1.1</string>
-	<key>CFBundleVersion</key><string>5</string>
-	<key>CFBundleIconFile</key><string>AppIcon</string>
-	<key>LSMinimumSystemVersion</key><string>15.0</string>
-	<key>NSHighResolutionCapable</key><true/>
-	<key>NSPrincipalClass</key><string>NSApplication</string>
-	<key>NSDesktopFolderUsageDescription</key><string>Scene checks that the documents saved in a scene still exist before reopening them.</string>
-	<key>NSDocumentsFolderUsageDescription</key><string>Scene checks that the documents saved in a scene still exist before reopening them.</string>
-	<key>NSDownloadsFolderUsageDescription</key><string>Scene checks that the documents saved in a scene still exist before reopening them.</string>
-	<key>NSAppleEventsUsageDescription</key><string>Scene reads Finder folders and Safari/Chrome tab addresses so it can save them in a scene and reopen them when you restore it.</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Scene</string>
+	<key>CFBundleExecutable</key>
+	<string>SceneApp</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.scenerecall.Scene</string>
+	<key>CFBundleName</key>
+	<string>Scene</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1.2</string>
+	<key>CFBundleVersion</key>
+	<string>6</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Scene reads Finder folders and Safari/Chrome tab addresses so it can save them in a scene and reopen them when you restore it.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Scene checks that the documents saved in a scene still exist before reopening them.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Scene checks that the documents saved in a scene still exist before reopening them.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Scene checks that the documents saved in a scene still exist before reopening them.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 </dict>
 </plist>

@@ -65,7 +65,7 @@ func draw(_ px: Int) -> Data {
     // --- Base: grafite opaca, più chiara in alto.
     ctx.saveGState()
     ctx.addPath(squircle); ctx.clip()
-    ctx.drawLinearGradient(grad([c(112, 114, 121), c(86, 88, 95), c(66, 68, 74)], [0, 0.5, 1]),
+    ctx.drawLinearGradient(grad([c(120, 148, 218), c(99, 124, 195), c(83, 96, 179)], [0, 0.5, 1]),
                            start: CGPoint(x: 0, y: rect.maxY), end: CGPoint(x: 0, y: rect.minY), options: [])
     ctx.restoreGState()
 
@@ -85,7 +85,7 @@ func draw(_ px: Int) -> Data {
         // Ombra portata: corta e scura vicino al bordo + lunga e diffusa.
         for (off, blur, a) in [(0.18, 0.25, shadowAlpha), (0.55, 1.1, shadowAlpha * 0.7)] as [(CGFloat, CGFloat, CGFloat)] {
             ctx.saveGState()
-            ctx.setShadow(offset: CGSize(width: 0, height: -u * off), blur: u * blur, color: c(20, 20, 26, a))
+            ctx.setShadow(offset: CGSize(width: 0, height: -u * off), blur: u * blur, color: c(20, 20, 26, a * 0.55))
             ctx.addPath(path); ctx.setFillColor(bottom); ctx.fillPath()
             ctx.restoreGState()
         }
@@ -127,8 +127,8 @@ func draw(_ px: Int) -> Data {
     let middle = R(margin + small + gap, margin, center, full)
     let right = R(16 - margin - small, 16 - margin - smallH, small, smallH)
 
-    let gray = (c(206, 204, 200), c(178, 176, 173), c(190, 188, 184), c(176, 174, 171))
-    let white = (c(250, 249, 247), c(226, 223, 221), c(236, 234, 231), c(222, 219, 216))
+    let gray = (c(255, 255, 255, 0.36), c(255, 255, 255, 0.29), c(255, 255, 255, 0.30), c(255, 255, 255, 0.26))
+    let white = (c(255, 255, 255, 0.60), c(255, 255, 255, 0.50), c(255, 255, 255, 0.52), c(255, 255, 255, 0.46))
     drawWindow(left, bar: 1.0, top: gray.0, bottom: gray.1, barTop: gray.2, barBottom: gray.3, shadowAlpha: 0.38)
     drawWindow(right, bar: 1.0, top: gray.0, bottom: gray.1, barTop: gray.2, barBottom: gray.3, shadowAlpha: 0.38)
     drawWindow(middle, bar: 1.2, top: white.0, bottom: white.1, barTop: white.2, barBottom: white.3, shadowAlpha: 0.5)

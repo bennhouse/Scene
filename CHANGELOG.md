@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- New icon: the suite's colour icons, Scene in blue.
+
 ## 1.1.1
 
 - Switching scenes no longer makes the toolbar buttons jump next to the scene name for an instant.
