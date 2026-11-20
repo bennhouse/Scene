@@ -24,7 +24,8 @@ final class SceneStore: ObservableObject {
         do {
             let data = try Data(contentsOf: url)
             let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-            scenes = try dec.decode([SavedScene].self, from: data)
+            // Le scene salvate prima della 1.1.3 possono contenere pannelli presi per finestre.
+            scenes = try dec.decode([SavedScene].self, from: data).map { $0.withoutPanels() }
             canSave = true
         } catch {
             // File illeggibile: lo si mette da parte intatto e non si scrive sopra.

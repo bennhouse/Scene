@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+- Apps that draw their panels as separate windows (Lightroom Classic) are saved as one window: restoring no longer shrinks the main window or keeps reopening the app looking for the panels. Scenes saved earlier are cleaned up automatically.
+
 ## 1.1.2
 
 - New icon: the suite's colour icons, Scene in blue.

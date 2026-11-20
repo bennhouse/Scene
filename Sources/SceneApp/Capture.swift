@@ -22,7 +22,7 @@ enum Capture {
             let s = current(name: name, windowIDs: &ids)
             return (s, ids)
         }
-        guard AX.isTrusted, !restorer.isRunning else { return scene }
+        guard AX.isTrusted, !restorer.isRunning else { return scene.withoutPanels() }
         let start = Dictionary(uniqueKeysWithValues: scene.displays.map { ($0.uuid, $0.currentOrdinal) })
         // Da leggere sul loro desktop: le finestre senza titolo e quelle di Firefox di cui non si
         // sono lette le schede (Firefox le mostra solo per le finestre del desktop visibile).
@@ -30,7 +30,7 @@ enum Capture {
             w.title == nil || (w.bundleID == BrowserAX.firefox && (w.content.urls ?? []).isEmpty)
         }
         let pending = scene.windows.filter { $0.desktopOrdinal != start[$0.displayUUID] && needsVisit($0) }
-        guard !pending.isEmpty else { return scene }
+        guard !pending.isEmpty else { return scene.withoutPanels() }
 
         restorer.isRunning = true
         InputBlocker.shared.begin(maxSeconds: InputBlocker.cap)
@@ -79,7 +79,7 @@ enum Capture {
         }
         restorer.warp(to: pointer)
         Log.write("Capture «\(name)»: \(pending.count) windows read by visiting their desktop")
-        return scene
+        return scene.withoutPanels()
     }
 
     static func current(name: String) -> SavedScene {
@@ -217,9 +217,11 @@ enum Capture {
                          visibleFrame: $0.visibleFrame, desktopCount: $0.desktopCount,
                          currentOrdinal: $0.currentOrdinal ?? 1)
         }
-        Log.write("Capture «\(name)»: \(windows.count) windows, setup \(Topology.config(of: displays).label)")
-        return SavedScene(name: name, created: Date(), config: Topology.config(of: displays),
-                          displays: saved, windows: windows)
+        let scene = SavedScene(name: name, created: Date(), config: Topology.config(of: displays),
+                               displays: saved, windows: windows).withoutPanels()
+        let panels = windows.count - scene.windows.count
+        Log.write("Capture «\(name)»: \(scene.windows.count) windows\(panels > 0 ? " (\(panels) panels left out)" : ""), setup \(Topology.config(of: displays).label)")
+        return scene
     }
 
     static func near(_ a: CGRect, _ b: CGRect, tol: CGFloat = 6) -> Bool {

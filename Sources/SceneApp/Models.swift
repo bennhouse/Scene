@@ -67,4 +67,22 @@ struct SavedScene: Codable, Identifiable, Hashable {
     var windows: [SavedWindow]
 
     func display(_ uuid: String) -> SavedDisplay? { displays.first { $0.uuid == uuid } }
+
+    /// Senza i pannelli: finestre senza titolo né contenuto che stanno dentro una finestra con
+    /// titolo della stessa app, sullo stesso desktop. Lightroom Classic, per esempio, disegna
+    /// barra dei moduli, filmstrip e pannelli laterali come finestre separate: salvate come
+    /// finestre a sé, al ripristino rimpicciolivano la finestra principale e la si cercava
+    /// all'infinito.
+    func withoutPanels() -> SavedScene {
+        var s = self
+        s.windows = windows.filter { w in
+            guard (w.title ?? "").isEmpty, w.content.isEmpty else { return true }
+            return !windows.contains { o in
+                o.id != w.id && o.bundleID == w.bundleID && o.displayUUID == w.displayUUID &&
+                o.desktopOrdinal == w.desktopOrdinal && !(o.title ?? "").isEmpty &&
+                o.frame.insetBy(dx: -2, dy: -2).contains(w.frame)
+            }
+        }
+        return s
+    }
 }
